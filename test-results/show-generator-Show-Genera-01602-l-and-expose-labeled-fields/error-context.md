@@ -33,10 +33,10 @@ Call log:
 - generic [ref=e5]:
   - generic [ref=e6]:
     - generic [ref=e7]:
-      - heading "Generate a radio show" [level=1] [ref=e8]
+      - heading "Produce a radio show" [level=1] [ref=e8]
       - paragraph [ref=e9]:
         - text: powered by
-        - link "gemini managed agents" [ref=e10] [cursor=pointer]:
+        - link "AI agents" [ref=e10] [cursor=pointer]:
           - /url: https://blog.google/innovation-and-ai/technology/developers-tools/managed-agents-gemini-api/
     - form "Generate radio show" [ref=e11]:
       - generic [ref=e14]:

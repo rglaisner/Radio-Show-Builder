@@ -1832,7 +1832,7 @@ export default function App() {
                     rel="noopener noreferrer" 
                     className="hover:text-white underline underline-offset-4 decoration-white/20 hover:decoration-white transition-colors cursor-pointer"
                   >
-                    gemini managed agents
+                    AI agents
                   </a>
                 </p>
               </div>
