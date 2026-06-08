@@ -10,28 +10,52 @@ import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signO
 import firebaseConfig from '../firebase-applet-config.json';
 import { MOCK_SHOW, transformShow } from './data';
 import { Transcript } from './components/Transcript';
+import { GuestRosterEditor } from './components/GuestRosterEditor';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
+import { z } from 'zod';
 import {
   buildShowConfig,
   TOPIC_MAX_LENGTH,
   SHOW_PRESETS,
   SHOW_STYLES,
-  GUEST_MODES,
   GEMINI_VOICES,
   HOST_DELIVERIES,
   MUSIC_MOODS,
   RADIO_FEATURE_KEYS,
   VOICE_LABELS,
+  MOOD_MAPPING,
+  formatShowConfigError,
   loadAdvancedSettings,
   saveAdvancedSettings,
   type ShowConfig,
   type UiMood,
   type ShowStyle,
-  type GuestMode,
   type GeminiVoice,
   type HostDelivery,
   type MusicMood,
 } from './showConfig';
+
+const FORM_IDS = {
+  topic: 'show-topic',
+  duration: 'show-duration',
+  mood: 'show-mood',
+  hostName: 'host-name',
+  hostVoice: 'host-voice',
+  hostPersona: 'host-persona',
+  hostDelivery: 'host-delivery',
+  hostAccent: 'host-accent',
+  showStyle: 'show-style',
+  guestMode: 'guest-mode',
+  guestCount: 'guest-count',
+  musicMood: 'music-mood',
+  playbackTimeline: 'playback-timeline',
+  playbackVolume: 'playback-volume',
+  shareUrl: 'share-url',
+} as const;
+
+function featureFieldId(key: string): string {
+  return `feature-${key}`;
+}
 
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
@@ -172,7 +196,11 @@ export default function App() {
   const [targetMood, setTargetMood] = useState<UiMood>('Informative');
   const [selectedPresetId, setSelectedPresetId] = useState<string | undefined>(undefined);
   const [advancedOverrides, setAdvancedOverrides] = useState<Partial<ShowConfig>>(() => loadAdvancedSettings() ?? {});
+  const [configError, setConfigError] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<'tech' | 'culture' | 'news'>('tech');
+
+  const effectiveShowStyle: ShowStyle =
+    advancedOverrides.structure?.style ?? MOOD_MAPPING[targetMood].suggestedStyle;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -1094,13 +1122,29 @@ export default function App() {
       const durationMinutes = ([3, 5, 10, 15] as const).includes(Number(d) as 3 | 5 | 10 | 15)
         ? (Number(d) as 3 | 5 | 10 | 15)
         : 3;
-      const showConfig = buildShowConfig({
-        topic: p,
-        durationMinutes,
-        mood: (m as UiMood) || targetMood,
-        presetId: selectedPresetId,
-        overrides: advancedOverrides,
-      });
+
+      let showConfig: ShowConfig;
+      try {
+        showConfig = buildShowConfig({
+          topic: p,
+          durationMinutes,
+          mood: (m as UiMood) || targetMood,
+          presetId: selectedPresetId,
+          overrides: advancedOverrides,
+        });
+        setConfigError(null);
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          setConfigError(formatShowConfigError(error));
+        } else if (error instanceof Error) {
+          setConfigError(error.message);
+        } else {
+          setConfigError('Invalid show configuration');
+        }
+        setIsGenerating(false);
+        setView('home');
+        return;
+      }
 
       console.log("[Client] Sending POST request to /api/generate-show with payload:", {
         topic: p,
@@ -1740,7 +1784,9 @@ export default function App() {
                 </p>
               </div>
 
-              <form onSubmit={(e) => {
+              <form
+                aria-label="Generate radio show"
+                onSubmit={(e) => {
                 if (quota && quota.remaining <= 0 && !IS_DEV) {
                   e.preventDefault();
                   return;
@@ -1763,6 +1809,9 @@ export default function App() {
                   <div className="relative bg-[#0d0d0d]/85 backdrop-blur-3xl border border-white/10 rounded-[1.5rem] p-4 flex flex-col gap-3 group-focus-within/box:border-white/20 transition-all duration-300">
                     <div className="w-full">
                       <textarea
+                        id={FORM_IDS.topic}
+                        name={FORM_IDS.topic}
+                        autoComplete="off"
                         rows={2}
                         placeholder="I want a talk radio show about...."
                         value={prompt}
@@ -1779,6 +1828,8 @@ export default function App() {
                         <div className="flex items-center gap-2 bg-white/[0.04] border border-white/5 rounded-full px-3 py-1.5 hover:bg-white/[0.08] transition-all relative focus-within:ring-2 focus-within:ring-io-blue focus-within:border-transparent">
                           <Clock className="w-3.5 h-3.5 text-white/40 shrink-0" />
                           <select
+                            id={FORM_IDS.duration}
+                            name={FORM_IDS.duration}
                             value={targetDuration}
                             onChange={(e) => setTargetDuration(e.target.value)}
                             className="bg-transparent border-none text-[11px] font-bold text-white/70 focus:outline-none focus:ring-0 cursor-pointer appearance-none uppercase tracking-wider pr-1"
@@ -1794,6 +1845,8 @@ export default function App() {
                         <div className="flex items-center gap-2 bg-white/[0.04] border border-white/5 rounded-full px-3 py-1.5 hover:bg-white/[0.08] transition-all relative focus-within:ring-2 focus-within:ring-io-blue focus-within:border-transparent">
                           <List className="w-3.5 h-3.5 text-white/40 shrink-0" />
                           <select
+                            id={FORM_IDS.mood}
+                            name={FORM_IDS.mood}
                             value={targetMood}
                             onChange={(e) => setTargetMood(e.target.value as UiMood)}
                             className="bg-transparent border-none text-[11px] font-bold text-white/70 focus:outline-none focus:ring-0 cursor-pointer appearance-none uppercase tracking-wider pr-1"
@@ -1870,9 +1923,12 @@ export default function App() {
                         >
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host name</label>
+                              <label htmlFor={FORM_IDS.hostName} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host name</label>
                               <input
+                                id={FORM_IDS.hostName}
+                                name={FORM_IDS.hostName}
                                 type="text"
+                                autoComplete="off"
                                 value={advancedOverrides.host?.name ?? ''}
                                 placeholder="Paul"
                                 onChange={(e) => updateAdvanced({ host: { name: e.target.value } as ShowConfig['host'] })}
@@ -1880,8 +1936,10 @@ export default function App() {
                               />
                             </div>
                             <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host voice</label>
+                              <label htmlFor={FORM_IDS.hostVoice} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host voice</label>
                               <select
+                                id={FORM_IDS.hostVoice}
+                                name={FORM_IDS.hostVoice}
                                 value={advancedOverrides.host?.voice ?? ''}
                                 onChange={(e) => updateAdvanced({ host: { voice: e.target.value as GeminiVoice } as ShowConfig['host'] })}
                                 className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
@@ -1893,8 +1951,11 @@ export default function App() {
                               </select>
                             </div>
                             <div className="space-y-2 md:col-span-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host persona</label>
+                              <label htmlFor={FORM_IDS.hostPersona} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host persona</label>
                               <textarea
+                                id={FORM_IDS.hostPersona}
+                                name={FORM_IDS.hostPersona}
+                                autoComplete="off"
                                 rows={2}
                                 value={advancedOverrides.host?.persona ?? ''}
                                 placeholder="Professional, warm British community radio host"
@@ -1903,8 +1964,10 @@ export default function App() {
                               />
                             </div>
                             <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Delivery style</label>
+                              <label htmlFor={FORM_IDS.hostDelivery} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Delivery style</label>
                               <select
+                                id={FORM_IDS.hostDelivery}
+                                name={FORM_IDS.hostDelivery}
                                 value={advancedOverrides.host?.delivery ?? ''}
                                 onChange={(e) => updateAdvanced({ host: { delivery: e.target.value as HostDelivery } as ShowConfig['host'] })}
                                 className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
@@ -1916,8 +1979,23 @@ export default function App() {
                               </select>
                             </div>
                             <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Show style</label>
+                              <label htmlFor={FORM_IDS.hostAccent} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Host accent</label>
+                              <input
+                                id={FORM_IDS.hostAccent}
+                                name={FORM_IDS.hostAccent}
+                                type="text"
+                                autoComplete="off"
+                                value={advancedOverrides.host?.accent ?? ''}
+                                placeholder="British English accent as heard in London, England"
+                                onChange={(e) => updateAdvanced({ host: { accent: e.target.value } as ShowConfig['host'] })}
+                                className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-io-blue"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label htmlFor={FORM_IDS.showStyle} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Show style</label>
                               <select
+                                id={FORM_IDS.showStyle}
+                                name={FORM_IDS.showStyle}
                                 value={advancedOverrides.structure?.style ?? ''}
                                 onChange={(e) => updateAdvanced({ structure: { style: e.target.value as ShowStyle, segments: [] } })}
                                 className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
@@ -1928,34 +2006,19 @@ export default function App() {
                                 ))}
                               </select>
                             </div>
+                            <GuestRosterEditor
+                              style={effectiveShowStyle}
+                              guests={advancedOverrides.guests ?? {}}
+                              hostVoice={advancedOverrides.host?.voice}
+                              guestModeId={FORM_IDS.guestMode}
+                              guestCountId={FORM_IDS.guestCount}
+                              onChange={(guests) => updateAdvanced({ guests: guests as ShowConfig['guests'] })}
+                            />
                             <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Guest mode</label>
+                              <label htmlFor={FORM_IDS.musicMood} className="text-[10px] font-bold uppercase tracking-wider text-white/40">Music mood</label>
                               <select
-                                value={advancedOverrides.guests?.mode ?? ''}
-                                onChange={(e) => updateAdvanced({ guests: { mode: e.target.value as GuestMode } as ShowConfig['guests'] })}
-                                className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
-                              >
-                                <option value="" className="bg-neutral-900">Auto</option>
-                                {GUEST_MODES.map((m) => (
-                                  <option key={m} value={m} className="bg-neutral-900">{m}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Guest count</label>
-                              <input
-                                type="number"
-                                min={1}
-                                max={6}
-                                value={advancedOverrides.guests?.count ?? ''}
-                                placeholder="Auto"
-                                onChange={(e) => updateAdvanced({ guests: { count: e.target.value ? Number(e.target.value) : undefined } as ShowConfig['guests'] })}
-                                className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Music mood</label>
-                              <select
+                                id={FORM_IDS.musicMood}
+                                name={FORM_IDS.musicMood}
                                 value={advancedOverrides.music?.mood ?? ''}
                                 onChange={(e) => updateAdvanced({ music: { mood: e.target.value as MusicMood, enabled: true } })}
                                 className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
@@ -1968,12 +2031,21 @@ export default function App() {
                             </div>
                           </div>
 
+                          {configError && (
+                            <p className="text-xs text-red-400 flex items-center gap-1.5">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              {configError}
+                            </p>
+                          )}
+
                           <div className="space-y-2">
                             <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Radio features</label>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                               {RADIO_FEATURE_KEYS.map((key) => (
-                                <label key={key} className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+                                <label key={key} htmlFor={featureFieldId(key)} className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
                                   <input
+                                    id={featureFieldId(key)}
+                                    name={featureFieldId(key)}
                                     type="checkbox"
                                     checked={Boolean(advancedOverrides.features?.[key as keyof ShowConfig['features']])}
                                     onChange={(e) => updateAdvanced({ features: { [key]: e.target.checked } as ShowConfig['features'] })}
@@ -2512,7 +2584,10 @@ export default function App() {
                     
                     <div className="h-0.5 md:h-1 flex-1 bg-white/10 rounded-full overflow-hidden relative group/timeline border border-white/[0.02]">
                       <input
+                        id={FORM_IDS.playbackTimeline}
+                        name={FORM_IDS.playbackTimeline}
                         type="range"
+                        aria-label="Playback timeline"
                         min="0"
                         max={selectedShow.duration}
                         value={currentTime}
@@ -2566,7 +2641,10 @@ export default function App() {
                     <Volume2 className="w-4 h-4 text-zinc-400/80" />
                     <div className="w-20 h-1 bg-white/10 rounded-full overflow-hidden relative group/vol cursor-pointer">
                       <input
+                        id={FORM_IDS.playbackVolume}
+                        name={FORM_IDS.playbackVolume}
                         type="range"
+                        aria-label="Playback volume"
                         min="0"
                         max="1"
                         step="0.01"
@@ -2653,9 +2731,11 @@ export default function App() {
                   </div>
 
                   <div className="flex gap-2 items-center bg-white/[0.03] border border-white/10 p-2 rounded-2xl">
-                    <input 
-                      type="text" 
-                      readOnly 
+                    <input
+                      id={FORM_IDS.shareUrl}
+                      name={FORM_IDS.shareUrl}
+                      type="text"
+                      readOnly
                       value={shareUrl}
                       className="flex-1 bg-transparent border-0 outline-none p-2 font-mono text-xs text-white/80 select-all"
                     />
