@@ -13,6 +13,7 @@ import { Transcript } from './components/Transcript';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
 import {
   buildShowConfig,
+  TOPIC_MAX_LENGTH,
   SHOW_PRESETS,
   SHOW_STYLES,
   GUEST_MODES,
@@ -1765,6 +1766,7 @@ export default function App() {
                         rows={2}
                         placeholder="I want a talk radio show about...."
                         value={prompt}
+                        maxLength={TOPIC_MAX_LENGTH}
                         onChange={(e) => setPrompt(e.target.value)}
                         className="w-full bg-transparent p-2 text-sm md:text-base font-normal text-white/90 focus:outline-none placeholder:text-white/20 resize-none min-h-[50px] leading-relaxed"
                       />

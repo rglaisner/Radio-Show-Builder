@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const TOPIC_MAX_LENGTH = 10_000;
+
 export const GEMINI_VOICES = ["Puck", "Kore", "Charon", "Fenrir"] as const;
 export type GeminiVoice = (typeof GEMINI_VOICES)[number];
 
@@ -90,7 +92,7 @@ const radioFeaturesSchema = z.object({
 export const showConfigSchema = z
   .object({
     version: z.literal(1).default(1),
-    topic: z.string().min(1).max(2000),
+    topic: z.string().min(1).max(TOPIC_MAX_LENGTH),
     durationMinutes: z.union([z.literal(3), z.literal(5), z.literal(10), z.literal(15)]),
     presetId: z.string().optional(),
     mood: z.enum(UI_MOODS).default("Informative"),
