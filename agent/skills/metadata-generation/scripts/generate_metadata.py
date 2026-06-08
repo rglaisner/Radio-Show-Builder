@@ -65,25 +65,91 @@ def make_fallback_metadata(transcript_text, duration_str, today_date, output_pat
         json.dump(fallback_data, f, indent=2)
     print(f"✅ Local fallback metadata saved successfully to {output_path}")
 
+def parse_script_speakers(script_text, host_name):
+    """Extract unique non-host speaker names from script.md."""
+    speakers = []
+    seen = set()
+    for line in script_text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or line in ("[connect]", "[stinger]", "[hold]"):
+            continue
+        if ":" not in line:
+            continue
+        speaker = line.split(":")[0].strip()
+        if speaker == host_name or speaker in seen:
+            continue
+        seen.add(speaker)
+        speakers.append(speaker)
+    return speakers
+
+
+def sanitize_guest_profiles(roster):
+    """Return roster profiles safe for metadata output."""
+    profiles = []
+    for guest in roster or []:
+        profiles.append({
+            "name": guest.get("name"),
+            "persona": guest.get("persona"),
+            "accent": guest.get("accent"),
+            "delivery": guest.get("delivery"),
+            "location": guest.get("location"),
+            "gender": guest.get("gender"),
+            "voice": guest.get("voice"),
+            "audioTreatment": guest.get("audioTreatment"),
+        })
+    return profiles
+
+
 def enrich_metadata(json_data, config, workspace):
     """Add generation config, speakers, and quality report to metadata."""
     host_name = get_host_name(config)
-    host_voice = config.get("host", {}).get("voice", "Puck")
+    host = config.get("host", {})
+    host_voice = host.get("voice", "Puck")
+    guests_config = config.get("guests", {})
+    roster = guests_config.get("roster", [])
 
-    speakers = [{"name": host_name, "role": "host", "voice": host_voice}]
-    for guest in config.get("guests", {}).get("roster", []):
-        if guest.get("name"):
-            speakers.append({
-                "name": guest["name"],
-                "role": "guest",
-                "voice": guest.get("voice"),
-            })
+    roster_by_name = {
+        guest["name"]: guest
+        for guest in roster
+        if guest.get("name")
+    }
+
+    speakers = [{
+        "name": host_name,
+        "role": "host",
+        "voice": host_voice,
+        "accent": host.get("accent"),
+        "delivery": host.get("delivery"),
+    }]
+
+    script_path = os.path.join(workspace, "data", "script.md")
+    script_speakers = []
+    if os.path.exists(script_path):
+        with open(script_path, encoding="utf-8") as f:
+            script_speakers = parse_script_speakers(f.read(), host_name)
+
+    guest_names = script_speakers or [
+        guest["name"] for guest in roster if guest.get("name")
+    ]
+
+    for name in guest_names:
+        roster_guest = roster_by_name.get(name, {})
+        speakers.append({
+            "name": name,
+            "role": "guest",
+            "voice": roster_guest.get("voice"),
+            "accent": roster_guest.get("accent"),
+            "delivery": roster_guest.get("delivery"),
+            "audioTreatment": roster_guest.get("audioTreatment", "phone"),
+        })
 
     json_data["generation_config"] = {
         "presetId": config.get("presetId"),
         "style": config.get("structure", {}).get("style"),
         "hostName": host_name,
-        "guestCount": config.get("guests", {}).get("count"),
+        "guestMode": guests_config.get("mode"),
+        "guestCount": guests_config.get("count"),
+        "guestProfiles": sanitize_guest_profiles(roster),
         "durationMinutes": config.get("durationMinutes"),
         "mood": config.get("mood"),
     }

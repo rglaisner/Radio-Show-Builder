@@ -1,14 +1,33 @@
 import type { ShowConfig } from "../../src/showConfig.ts";
 import { getEnabledFeatures } from "../../src/showConfig.ts";
 
+function formatRosterSummary(config: ShowConfig): string {
+  const roster = config.guests.roster;
+  if (!roster?.length) return "";
+
+  const lines = roster.map((guest, index) => {
+    const label = guest.name ?? `Archetype ${index + 1}`;
+    const parts = [label];
+    if (guest.persona) parts.push(guest.persona);
+    if (guest.location) parts.push(`from ${guest.location}`);
+    if (guest.accent) parts.push(`accent: ${guest.accent}`);
+    if (guest.delivery) parts.push(`delivery: ${guest.delivery}`);
+    if (guest.voice) parts.push(`voice: ${guest.voice}`);
+    return parts.join(" — ");
+  });
+
+  return `\n- Guest roster: ${lines.join("; ")}`;
+}
+
 export function buildAgentPrompt(config: ShowConfig): string {
   const enabledFeatures = getEnabledFeatures(config.features);
   const guestSummary =
     config.guests.mode === "fixed" && config.guests.roster
-      ? `${config.guests.roster.length} fixed guests`
+      ? `${config.guests.roster.length} fixed guests (${config.guests.roster.map((g) => g.name).filter(Boolean).join(", ")})`
       : config.guests.mode === "guided"
         ? `${config.guests.count ?? 2} guided guests`
         : `auto-generated guests (target ${config.guests.count ?? "style default"})`;
+  const rosterSummary = formatRosterSummary(config);
 
   const enabledSegments = config.structure.segments
     .filter((s) => s.enabled)
@@ -23,7 +42,7 @@ Show parameters:
 - Target duration: ${config.durationMinutes} minutes
 - Show style: ${config.structure.style}
 - Host: ${config.host.name} (${config.host.delivery} delivery, voice: ${config.host.voice})
-- Guests: ${guestSummary} (mode: ${config.guests.mode})
+- Guests: ${guestSummary} (mode: ${config.guests.mode})${rosterSummary}
 - Music mood: ${config.music.mood} (enabled: ${config.music.enabled})
 - Tone context: ${config.toneContext}
 - Enabled segments: ${enabledSegments}

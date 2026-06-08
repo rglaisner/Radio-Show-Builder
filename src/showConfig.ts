@@ -62,6 +62,8 @@ export type RadioFeatureKey = (typeof RADIO_FEATURE_KEYS)[number];
 const guestProfileSchema = z.object({
   name: z.string().optional(),
   persona: z.string().optional(),
+  accent: z.string().max(200).optional(),
+  delivery: z.enum(HOST_DELIVERIES).optional(),
   location: z.string().optional(),
   gender: z.enum(GUEST_GENDERS).default("unspecified"),
   voice: z.enum(GEMINI_VOICES).optional(),
@@ -132,6 +134,30 @@ export const showConfigSchema = z
         code: z.ZodIssueCode.custom,
         message: "Guided guest mode requires a guest count",
         path: ["guests", "count"],
+      });
+    }
+    if (config.guests.mode === "fixed" && config.guests.roster) {
+      for (let i = 0; i < config.guests.roster.length; i++) {
+        const name = config.guests.roster[i]?.name?.trim();
+        if (!name) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Fixed guest mode requires a name for every guest",
+            path: ["guests", "roster", i, "name"],
+          });
+        }
+      }
+    }
+    if (
+      config.guests.mode === "guided" &&
+      config.guests.count &&
+      config.guests.roster &&
+      config.guests.roster.length > config.guests.count
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Guest roster cannot exceed guest count in guided mode",
+        path: ["guests", "roster"],
       });
     }
   });
@@ -346,6 +372,90 @@ const STYLE_GUEST_LIMITS: Record<ShowStyle, { min: number; max: number }> = {
   explainer: { min: 2, max: 4 },
 };
 
+export function getGuestLimits(style: ShowStyle): { min: number; max: number } {
+  return STYLE_GUEST_LIMITS[style];
+}
+
+export function createEmptyGuestProfile(): GuestProfile {
+  return {
+    gender: "unspecified",
+    audioTreatment: "phone",
+  };
+}
+
+export function syncGuestRosterForMode(
+  guests: Partial<ShowConfig["guests"]>,
+  style: ShowStyle
+): Partial<ShowConfig["guests"]> {
+  const mode = guests.mode ?? "auto";
+  const limits = getGuestLimits(style);
+  const defaultCount = clampGuestCount(style, guests.count ?? getDefaultGuestCount(style));
+
+  if (mode === "auto") {
+    return {
+      mode: "auto",
+      count: guests.count !== undefined ? clampGuestCount(style, guests.count) : defaultCount,
+    };
+  }
+
+  if (mode === "guided") {
+    const count = clampGuestCount(style, guests.count ?? defaultCount);
+    let roster = guests.roster ? [...guests.roster] : [];
+    while (roster.length < count) {
+      roster.push(createEmptyGuestProfile());
+    }
+    if (roster.length > count) {
+      roster = roster.slice(0, count);
+    }
+    return { mode: "guided", count, roster };
+  }
+
+  // fixed
+  let roster = guests.roster?.length ? [...guests.roster] : [createEmptyGuestProfile()];
+  roster = roster.slice(0, limits.max);
+  return { mode: "fixed", count: roster.length, roster };
+}
+
+const FEMALE_VOICES: GeminiVoice[] = ["Kore"];
+const MALE_VOICES: GeminiVoice[] = ["Puck", "Charon", "Fenrir"];
+
+export function assignDistinctGuestVoices(
+  roster: GuestProfile[],
+  hostVoice: GeminiVoice
+): GuestProfile[] {
+  const usedVoices = new Set<GeminiVoice>([hostVoice]);
+  let maleIndex = 0;
+  let femaleIndex = 0;
+
+  return roster.map((guest) => {
+    if (guest.voice) {
+      usedVoices.add(guest.voice);
+      return guest;
+    }
+
+    const pool =
+      guest.gender === "female"
+        ? FEMALE_VOICES
+        : MALE_VOICES.filter((v) => !usedVoices.has(v) || guest.gender === "male");
+
+    let voice: GeminiVoice | undefined;
+    if (guest.gender === "female") {
+      voice = pool[femaleIndex % pool.length];
+      femaleIndex += 1;
+    } else {
+      const malePool = MALE_VOICES.filter((v) => !usedVoices.has(v));
+      voice = malePool[maleIndex % malePool.length] ?? MALE_VOICES[maleIndex % MALE_VOICES.length];
+      maleIndex += 1;
+    }
+
+    if (voice) {
+      usedVoices.add(voice);
+      return { ...guest, voice };
+    }
+    return guest;
+  });
+}
+
 export function clampGuestCount(style: ShowStyle, count: number): number {
   const limits = STYLE_GUEST_LIMITS[style];
   return Math.max(limits.min, Math.min(limits.max, count));
@@ -406,7 +516,14 @@ export function buildShowConfig(input: {
     : base;
 
   if (input.overrides) {
-    return showConfigSchema.parse(deepMergeShowConfig(merged, sanitizeOverrides(input.overrides)));
+    const withOverrides = deepMergeShowConfig(merged, sanitizeOverrides(input.overrides));
+    if (withOverrides.guests.roster?.length) {
+      withOverrides.guests.roster = assignDistinctGuestVoices(
+        withOverrides.guests.roster,
+        withOverrides.host.voice
+      );
+    }
+    return showConfigSchema.parse(withOverrides);
   }
 
   if (!preset) {
@@ -454,7 +571,8 @@ function sanitizeOverrides(partial: Partial<ShowConfig>): Partial<ShowConfig> {
   if (clean.guests) {
     const guests = { ...clean.guests };
     if (!guests.mode) delete guests.mode;
-    if (!guests.count) delete guests.count;
+    if (guests.count === undefined) delete guests.count;
+    if (!guests.roster?.length) delete guests.roster;
     clean.guests = Object.keys(guests).length > 0 ? guests : undefined;
   }
   if (clean.music && !clean.music.mood) {
@@ -468,11 +586,16 @@ function sanitizeOverrides(partial: Partial<ShowConfig>): Partial<ShowConfig> {
 }
 
 function deepMergeShowConfig(base: ShowConfig, partial: Partial<ShowConfig>): ShowConfig {
+  const mergedGuests = { ...base.guests, ...partial.guests };
+  if (partial.guests?.roster !== undefined) {
+    mergedGuests.roster = partial.guests.roster;
+  }
+
   return {
     ...base,
     ...partial,
     host: { ...base.host, ...partial.host },
-    guests: { ...base.guests, ...partial.guests },
+    guests: mergedGuests,
     structure: {
       style: partial.structure?.style ?? base.structure.style,
       segments:
@@ -531,6 +654,25 @@ export const VOICE_LABELS: Record<GeminiVoice, string> = {
   Charon: "Deep male",
   Fenrir: "Energetic male",
 };
+
+export const AUDIO_TREATMENT_LABELS: Record<AudioTreatment, string> = {
+  phone: "Phone call (default)",
+  studio: "Studio quality",
+  field: "Field reporter",
+};
+
+export const GUEST_GENDER_LABELS: Record<GuestGender, string> = {
+  male: "Male",
+  female: "Female",
+  unspecified: "Unspecified",
+};
+
+export function formatShowConfigError(error: z.ZodError): string {
+  const first = error.issues[0];
+  if (!first) return "Invalid show configuration";
+  const path = first.path.length > 0 ? `${first.path.join(".")}: ` : "";
+  return `${path}${first.message}`;
+}
 
 export const ADVANCED_SETTINGS_KEY = "ai-radio-advanced-settings";
 

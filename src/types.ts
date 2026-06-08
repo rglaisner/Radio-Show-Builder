@@ -8,6 +8,20 @@ export interface SpeakerInfo {
   name: string;
   role: "host" | "guest" | "co-host" | "reporter";
   voice?: string;
+  accent?: string;
+  delivery?: string;
+  audioTreatment?: string;
+}
+
+export interface GuestProfileSummary {
+  name?: string;
+  persona?: string;
+  accent?: string;
+  delivery?: string;
+  location?: string;
+  gender?: string;
+  voice?: string;
+  audioTreatment?: string;
 }
 
 export interface QualityReportSummary {
@@ -20,7 +34,9 @@ export interface GenerationConfigSummary {
   presetId?: string;
   style?: string;
   hostName?: string;
+  guestMode?: string;
   guestCount?: number;
+  guestProfiles?: GuestProfileSummary[];
   featuresEnabled?: string[];
 }
 

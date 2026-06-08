@@ -73,9 +73,29 @@ def main():
     host_lines = line_counts.get(host_name, 0)
     host_pct = (host_lines / total_lines * 100) if total_lines else 0
 
+    guests_config = config.get("guests", {})
+    guest_mode = guests_config.get("mode", "auto")
+    roster = guests_config.get("roster", [])
+    target_count = guests_config.get("count")
+
     deterministic_issues = []
     if host_name not in line_counts:
         deterministic_issues.append(f"Host '{host_name}' has no lines in script")
+
+    if guest_mode == "fixed" and roster:
+        for guest in roster:
+            name = guest.get("name")
+            if name and name not in line_counts:
+                deterministic_issues.append(
+                    f"Fixed roster guest '{name}' has no lines in script"
+                )
+
+    if guest_mode == "guided" and target_count:
+        non_host_speakers = [s for s in line_counts if s != host_name]
+        if len(non_host_speakers) != target_count:
+            deterministic_issues.append(
+                f"Expected {target_count} guest speakers, found {len(non_host_speakers)}"
+            )
 
     for speaker, count in line_counts.items():
         if speaker == host_name:

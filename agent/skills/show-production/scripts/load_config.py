@@ -81,6 +81,36 @@ def get_enabled_features(config):
     return [key for key, enabled in features.items() if enabled is True and key != "signOffPhrase"]
 
 
+def _format_guest_archetype(guest, index):
+    """Format a single guest/archetype line for script instructions."""
+    label = guest.get("name") or f"Archetype {index + 1}"
+    persona = guest.get("persona", "tech-savvy caller")
+    location = guest.get("location", "remote location")
+    gender = guest.get("gender", "unspecified")
+    accent = guest.get("accent")
+    delivery = guest.get("delivery")
+    treatment = guest.get("audioTreatment", "phone")
+
+    parts = [f"- {label}: {persona}, calling from {location}"]
+    if gender != "unspecified":
+        parts.append(f"gender: {gender}")
+    if accent:
+        parts.append(f"accent: {accent}")
+    if delivery:
+        parts.append(f"delivery: {delivery}")
+    if treatment != "phone":
+        parts.append(f"audio: {treatment}")
+    return ", ".join(parts)
+
+
+def _gender_tag(gender):
+    if gender == "female":
+        return "[Female]"
+    if gender == "male":
+        return "[Male]"
+    return ""
+
+
 def build_guest_instructions(config):
     guests = config.get("guests", {})
     mode = guests.get("mode", "auto")
@@ -91,26 +121,42 @@ def build_guest_instructions(config):
         lines = [
             f"**Guests (FIXED ROSTER — use exactly these {len(roster)} speakers):**"
         ]
-        for guest in roster:
+        for i, guest in enumerate(roster):
             name = guest.get("name") or "Guest"
             persona = guest.get("persona", "tech-savvy caller")
             location = guest.get("location", "remote location")
             gender = guest.get("gender", "unspecified")
+            accent = guest.get("accent") or f"based on {location}"
+            delivery = guest.get("delivery", "conversational")
+            gender_tag = _gender_tag(gender)
+            accent_tag = f"[Accent: {accent}]" if accent else ""
+            lines.append(_format_guest_archetype(guest, i))
             lines.append(
-                f"- {name}: {persona}, calling from {location}"
-                + (f", gender: {gender}" if gender != "unspecified" else "")
+                f"  Speaker line format for {name}: "
+                f"{name}: {gender_tag} {accent_tag} [dialogue]".strip()
             )
         lines.append(
             "You MUST use these exact speaker names. Do NOT invent different guest names."
         )
+        lines.append(
+            "Introduce each caller by name and location before their first spoken line."
+        )
         return "\n".join(lines)
 
     if mode == "guided":
-        return (
-            f"**Guests (GUIDED — generate exactly {count} callers):**\n"
-            f"Create {count} distinct callers matching the show style. "
-            "Give each a unique name, location, and perspective."
-        )
+        lines = [
+            f"**Guests (GUIDED — generate exactly {count} callers):**",
+            f"Create {count} distinct callers matching the show style.",
+            "Give each a unique name, location, and perspective.",
+            "Introduce each caller by name and location before their first spoken line.",
+        ]
+        if roster:
+            lines.append(
+                "Use these archetypes as inspiration (you may invent names, but match persona/location/gender):"
+            )
+            for i, guest in enumerate(roster[:count]):
+                lines.append(_format_guest_archetype(guest, i))
+        return "\n".join(lines)
 
     return (
         f"**Guests (AUTO — generate callers matching the style, target ~{count}):**\n"

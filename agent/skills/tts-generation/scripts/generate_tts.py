@@ -58,6 +58,16 @@ def build_profiles(config):
     }
 
 
+def guest_accent(guest):
+    accent = guest.get("accent")
+    if accent:
+        return accent
+    location = guest.get("location")
+    if location:
+        return f"Based on location — {location}"
+    return "American English"
+
+
 def build_guest_profiles(config):
     profiles = {}
     roster = config.get("guests", {}).get("roster", [])
@@ -65,6 +75,8 @@ def build_guest_profiles(config):
         name = guest.get("name")
         if not name:
             continue
+        delivery = guest.get("delivery", "conversational")
+        accent = guest_accent(guest)
         profiles[name] = {
             "profile": (
                 f"# AUDIO PROFILE: {name}\n"
@@ -73,12 +85,34 @@ def build_guest_profiles(config):
             ),
             "scene": f"## THE SCENE: {guest.get('location', 'Remote location')}",
             "notes": (
-                "### DIRECTOR'S NOTES\nStyle: Conversational, natural.\n"
-                f"Accent: Based on location — {guest.get('location', 'American English')}."
+                f"### DIRECTOR'S NOTES\n"
+                f"Style: {delivery}.\n"
+                f"Pacing: Normal conversational pace.\n"
+                f"Accent: {accent}."
             ),
             "treatment": guest.get("audioTreatment", "phone"),
         }
     return profiles
+
+
+def build_roster_lookups(config):
+    """Build name-indexed voice, gender, and accent maps from guest roster."""
+    voices = {}
+    genders = {}
+    accents = {}
+    for guest in config.get("guests", {}).get("roster", []):
+        name = guest.get("name")
+        if not name:
+            continue
+        if guest.get("voice"):
+            voices[name] = guest["voice"]
+        gender = guest.get("gender", "unspecified")
+        if gender == "female":
+            genders[name] = "Female"
+        elif gender == "male":
+            genders[name] = "Male"
+        accents[name] = guest_accent(guest)
+    return voices, genders, accents
 
 
 def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
@@ -272,17 +306,14 @@ def main():
     male_index = 0
     prepared_turns = []
 
-    roster_voices = {}
-    for guest in config.get("guests", {}).get("roster", []):
-        if guest.get("name") and guest.get("voice"):
-            roster_voices[guest["name"]] = guest["voice"]
+    roster_voices, roster_genders, roster_accents = build_roster_lookups(config)
 
     for i, (speaker, text) in enumerate(turns):
         if speaker == "__marker__":
             prepared_turns.append((i, speaker, text, "", "", False))
             continue
 
-        gender = "Male"
+        gender = roster_genders.get(speaker, "Male")
         if "[Female]" in text:
             gender = "Female"
             text = text.replace("[Female]", "").strip()
@@ -290,7 +321,7 @@ def main():
             gender = "Male"
             text = text.replace("[Male]", "").strip()
 
-        accent = "American English"
+        accent = roster_accents.get(speaker, "American English")
         accent_match = re.search(r"\[Accent: ([^\]]+)\]", text)
         if accent_match:
             accent = accent_match.group(1)
