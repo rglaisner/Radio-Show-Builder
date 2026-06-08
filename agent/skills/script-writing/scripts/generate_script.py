@@ -1,61 +1,68 @@
 #!/usr/bin/env python3
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Generate the AI Talk Radio radio show script from research using the Interactions API.
-
-Usage:
-    python3 generate_script.py --workspace ./workspace
-    python3 generate_script.py --workspace ./workspace --style debate
-    python3 generate_script.py --workspace ./workspace --style interview
-
-Requires:
-    pip install google-genai
-
-Output:
-    {workspace}/data/script.md
-"""
+"""Generate the AI Talk Radio radio show script from research using the Interactions API."""
 
 import argparse
 import os
+import sys
+
 from google import genai
 
-BASE_PROMPT = """You are a scriptwriter for "AI Talk Radio", a community radio show for a nerdy, tech-savvy audience.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
+from load_config import (  # noqa: E402
+    build_guest_instructions,
+    build_segment_instructions,
+    get_host_name,
+    load_show_config,
+)
 
-Write a ~3-minute radio script based on the research provided. The show has:
+STYLE_PROMPTS = {
+    "debate": """
+**Style: DEBATE**
 
-**Host**: Paul (in the studio) — a calm, measured British moderator broadcasting from a London studio. Professional, intellectual, and polite.
+**Callers**: For each topic, generate TWO callers representing opposing views. They should disagree respectfully but firmly.
 
-**Format rules:**
-- Every line MUST start with a speaker name and colon: `Paul:` or `[CallerName]:`
-- You MUST include a gender tag `[Male]` or `[Female]` at the beginning of the transcript for every caller turn.
-- You MUST include an **accent tag** `[Accent: <accent_description>]` matching the location the caller is supposedly calling from (e.g., `[Accent: Irish]` if calling from Dublin, `[Accent: Southern US]` if from Texas, `[Accent: Australian]` from Sydney, etc.).
-- Example: `Caller1: [Male] [Accent: Irish] [hesitantly] I think...`
-- You MUST include **audio tags** in square brackets to indicate how a line should be delivered.
-- Use tags like `[sighs]`, `[frustratedly]`, `[calmly]`, `[whispers]`, `[indignantly]` to make performances rich.
-- **CRITICAL**: The callers are amateurs. They should sound rough, imperfect, and natural. They should NOT speak in perfect, complete sentences. They should cut themselves off, use fillers like "uh", "like", "you know".
-- **Tone**: Callers are smart, tech-savvy individuals (nerds), not experts but informed. Their speech is imperfect because it is spontaneous, not because they lack intelligence.
-- **Host Introduction**: Host Paul MUST always introduce a new caller by name and location before they speak for the first time.
-- No stage directions outside of the audio tags in the transcript.
-- Keep sentences short and punchy — this is spoken word.
-- Target ~450-500 words total.
-- DO NOT fabricate any facts. Only use information from the research provided.
-- Time of Day: Do NOT assume the time of day (avoid "Good morning", "Good evening", etc.).
-- No Songs: The radio show does NOT play songs. Do not include lines about playing music tracks or songs.
-- No Ad Breaks: Do NOT include ad breaks or say "stay tuned" for more.
-- Clean Wrap Up: Do a clean wrap up at the end of the show without promising future segments.
-- The research may come from any source (news, blogs, GitHub, papers, forums). Adapt your script to fit whatever content is provided.
+**Structure:**
+1. Cold Open (10 sec): Host teases the most controversial take.
+2. Intro (15 sec): Host welcomes listeners, sets up the debate format.
+3. Debate Segments (2.5 min): Host introduces a topic, takes calls from two sides. Callers argue their positions, host moderates.
+4. Closing (15 sec): Host summarizes both sides, thanks callers.""",
+    "roundtable": """
+**Style: ROUNDTABLE**
 
+**Callers**: 3-4 callers each bringing a different angle on the topic. Collaborative, building on each other's points rather than arguing.
+
+**Structure:**
+1. Cold Open (10 sec): Host previews the topic.
+2. Intro (15 sec): Host welcomes the panel and introduces each caller.
+3. Discussion (2.5 min): Open conversation — callers riff on each other's points, host guides the flow.
+4. Closing (15 sec): Host ties the threads together.""",
+    "interview": """
+**Style: INTERVIEW**
+
+**Callers**: 1-2 callers presented as people with direct experience or deep knowledge. Host asks probing questions — this is more Q&A than conversation.
+
+**Structure:**
+1. Cold Open (10 sec): Host teases what the guest will reveal.
+2. Intro (15 sec): Host introduces the guest(s) and their background.
+3. Interview (2.5 min): Host asks questions, guest(s) answer in depth. Follow-up questions encouraged.
+4. Closing (15 sec): Host thanks the guest(s) and summarizes key takeaways.""",
+    "explainer": """
+**Style: EXPLAINER**
+
+**Callers**: 2-3 callers who each explain a different aspect of the topic. Think of it as a collaborative "teach the audience" format.
+
+**Structure:**
+1. Cold Open (10 sec): Host poses a question the audience might be wondering.
+2. Intro (15 sec): Host sets up the topic and says we have people who can break it down.
+3. Explainer Segments (2.5 min): Each caller explains their piece. Host asks clarifying questions on behalf of the audience.
+4. Closing (15 sec): Host recaps the key points.""",
+}
+
+STYLE_PROMPTS["default"] = STYLE_PROMPTS["debate"]
+VALID_STYLES = list(STYLE_PROMPTS.keys())
+
+CONTENT_SAFETY = """
 **CONTENT SAFETY — strictly off-limits:**
 - Do NOT use any profanity, cuss words, or explicit language.
 - Do NOT discuss politics, political parties, politicians, elections, legislation, or government policy.
@@ -67,120 +74,119 @@ Write a ~3-minute radio script based on the research provided. The show has:
 - If a research topic touches any of the above, skip it or focus only on the technical aspects.
 - Keep the tone light, nerdy, and strictly focused on technology, software, science, and engineering."""
 
-STYLE_PROMPTS = {
-    "debate": """
-**Style: DEBATE**
 
-**Callers**: For each topic, generate TWO callers representing opposing views. They should disagree respectfully but firmly.
+def build_base_prompt(config, duration, host_name):
+    host = config.get("host", {})
+    persona = host.get("persona", "Professional radio host")
+    accent = host.get("accent", "British English")
+    delivery = host.get("delivery", "measured")
+    target_words = duration * 125
 
-**Structure:**
-1. Cold Open (10 sec): Paul teases the most controversial take.
-2. Intro (15 sec): Paul welcomes listeners, sets up the debate format.
-3. Debate Segments (2.5 min): Paul introduces a topic, takes calls from two sides. Callers argue their positions, Paul moderates.
-4. Closing (15 sec): Paul summarizes both sides, thanks callers.""",
+    return f"""You are a scriptwriter for "AI Talk Radio", a community radio show for a nerdy, tech-savvy audience.
 
-    "roundtable": """
-**Style: ROUNDTABLE**
+Write a ~{duration}-minute radio script based on the research provided. The show has:
 
-**Callers**: 3-4 callers each bringing a different angle on the topic. Collaborative, building on each other's points rather than arguing.
+**Host**: {host_name} (in the studio) — {persona}. Delivery style: {delivery}. Accent: {accent}.
 
-**Structure:**
-1. Cold Open (10 sec): Paul previews the topic.
-2. Intro (15 sec): Paul welcomes the panel and introduces each caller.
-3. Discussion (2.5 min): Open conversation — callers riff on each other's points, Paul guides the flow.
-4. Closing (15 sec): Paul ties the threads together.""",
+**Format rules:**
+- Every line MUST start with a speaker name and colon: `{host_name}:` or `[CallerName]:`
+- You MUST include a gender tag `[Male]` or `[Female]` at the beginning of every caller turn.
+- You MUST include an **accent tag** `[Accent: <accent_description>]` matching the caller's location.
+- Example: `Caller1: [Male] [Accent: Irish] [hesitantly] I think...`
+- You MUST include **audio tags** in square brackets to indicate delivery.
+- Use tags like `[sighs]`, `[frustratedly]`, `[calmly]`, `[whispers]`, `[indignantly]`.
+- **CRITICAL**: Callers are amateurs — imperfect, natural speech with fillers ("uh", "like", "you know").
+- **Tone**: Callers are smart, tech-savvy individuals, not professional broadcasters.
+- **Host Introduction**: Host {host_name} MUST introduce each new caller by name and location before their first line.
+- No stage directions outside of audio tags in the transcript.
+- Keep sentences short and punchy — this is spoken word.
+- Target ~{target_words} words total.
+- DO NOT fabricate any facts. Only use information from the research provided.
+- Time of Day: Do NOT assume the time of day (avoid "Good morning", "Good evening", etc.).
+- No Songs: Do NOT include lines about playing music tracks or songs.
+- Clean Wrap Up: Do a clean wrap up at the end without promising future segments.
+- Marker lines `[connect]`, `[stinger]`, `[hold]` may appear on their own line — keep them exactly as written.
 
-    "interview": """
-**Style: INTERVIEW**
-
-**Callers**: 1-2 callers presented as people with direct experience or deep knowledge. Paul asks probing questions — this is more Q&A than conversation.
-
-**Structure:**
-1. Cold Open (10 sec): Paul teases what the guest will reveal.
-2. Intro (15 sec): Paul introduces the guest(s) and their background.
-3. Interview (2.5 min): Paul asks questions, guest(s) answer in depth. Follow-up questions encouraged.
-4. Closing (15 sec): Paul thanks the guest(s) and summarizes key takeaways.""",
-
-    "explainer": """
-**Style: EXPLAINER**
-
-**Callers**: 2-3 callers who each explain a different aspect of the topic. Think of it as a collaborative "teach the audience" format.
-
-**Structure:**
-1. Cold Open (10 sec): Paul poses a question the audience might be wondering.
-2. Intro (15 sec): Paul sets up the topic and says we have people who can break it down.
-3. Explainer Segments (2.5 min): Each caller explains their piece. Paul asks clarifying questions on behalf of the audience.
-4. Closing (15 sec): Paul recaps the key points.""",
-}
-
-# Default style when none specified
-STYLE_PROMPTS["default"] = STYLE_PROMPTS["debate"]
-
-VALID_STYLES = list(STYLE_PROMPTS.keys())
+{CONTENT_SAFETY}"""
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate AI Talk Radio radio script")
     parser.add_argument("--workspace", default="workspace", help="Workspace directory")
-    parser.add_argument(
-        "--style",
-        default="default",
-        choices=VALID_STYLES,
-        help=f"Show format: {', '.join(VALID_STYLES)}",
-    )
-    parser.add_argument(
-        "--duration",
-        type=int,
-        default=3,
-        help="Target duration in minutes",
-    )
-    parser.add_argument(
-        "--context",
-        default="",
-        help="Additional tone/style notes inferred from the user prompt (e.g. 'emphasize the technical details'). Do not use for content selection.",
-    )
+    parser.add_argument("--config", default=None, help="Path to show_config.json")
+    parser.add_argument("--style", default=None, choices=VALID_STYLES, help="Show format override")
+    parser.add_argument("--duration", type=int, default=None, help="Target duration in minutes")
+    parser.add_argument("--context", default="", help="Additional tone/style notes")
+    parser.add_argument("--revision", default="", help="Revision notes from script review")
     args = parser.parse_args()
+
+    config = load_show_config(args.workspace, args.config)
+    host_name = get_host_name(config)
+    duration = args.duration or config.get("durationMinutes", 3)
+    style = args.style or config.get("structure", {}).get("style", "debate")
+    if style not in STYLE_PROMPTS:
+        style = "debate"
+    context = args.context or config.get("toneContext", "")
 
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 
-    # Read research
     research_dir = os.path.join(args.workspace, "data", "research")
     research = ""
-    for fname in sorted(os.listdir(research_dir)):
-        if fname.endswith(".md"):
-            with open(os.path.join(research_dir, fname)) as f:
-                research += f.read() + "\n\n"
+    if os.path.isdir(research_dir):
+        for fname in sorted(os.listdir(research_dir)):
+            if fname.endswith(".md"):
+                with open(os.path.join(research_dir, fname), encoding="utf-8") as f:
+                    research += f.read() + "\n\n"
 
     if not research.strip():
         print("ERROR: No research found in data/research/. Run the research step first.")
         return
 
-    # Build system prompt = base + style
-    target_words = args.duration * 125
-    modified_base_prompt = BASE_PROMPT.replace(
-        "Write a ~3-minute radio script",
-        f"Write a ~{args.duration}-minute radio script"
-    ).replace(
-        "- Target ~450-500 words total.",
-        f"- Target ~{target_words} words total."
-    )
-
-    # Make style prompt durations dynamic
-    main_seg_min = (args.duration * 60 - 40) / 60
+    main_seg_min = (duration * 60 - 40) / 60
     main_seg_str = f"{main_seg_min:.1f} min"
-    style_prompt = STYLE_PROMPTS[args.style].replace("2.5 min", main_seg_str)
+    style_prompt = STYLE_PROMPTS[style].replace("2.5 min", main_seg_str)
+    style_prompt = style_prompt.replace("Host", f"Host {host_name}")
+    style_prompt = style_prompt.replace("host", "host")
 
-    system_prompt = modified_base_prompt + style_prompt
+    system_prompt = build_base_prompt(config, duration, host_name)
+    system_prompt += "\n\n" + style_prompt
+    system_prompt += "\n\n" + build_guest_instructions(config)
+    segment_instructions = build_segment_instructions(config)
+    if segment_instructions:
+        system_prompt += "\n\n" + segment_instructions
 
-    # Conditionally add Hacker News credit if it's in the research
+    if config.get("features", {}).get("coHost"):
+        system_prompt += (
+            "\n\n**Co-host**: Include a second studio co-host for brief banter in intro and closing. "
+            "Give them a distinct name. Co-host lines do NOT get phone filter treatment."
+        )
+
+    if config.get("features", {}).get("fieldReporter"):
+        system_prompt += (
+            "\n\n**Field Reporter**: Include one on-location reporter segment with a location tag."
+        )
+
     if "Hacker News" in research:
-        system_prompt += "\n\n**CRITICAL INSTRUCTION**: The research provided comes from Hacker News. The host MUST explicitly mention and give credit to Hacker News during the show."
+        system_prompt += (
+            "\n\n**CRITICAL INSTRUCTION**: The research comes from Hacker News. "
+            f"The host MUST explicitly mention and give credit to Hacker News during the show."
+        )
 
-    if args.context:
-        system_prompt += f"\n\n**ADDITIONAL CONTEXT FROM USER**: {args.context}\n(Note: Incorporate this context naturally. Maintain the show's grounded, conversational tone. Apply this context ONLY to the tone and style of the conversation; do NOT use it to limit or dictate which specific stories or facts from the research are discussed.)"
+    if context:
+        system_prompt += (
+            f"\n\n**ADDITIONAL CONTEXT FROM USER**: {context}\n"
+            "(Apply ONLY to tone and style; do NOT dictate which facts to discuss.)"
+        )
 
-    print(f"=== AI Talk Radio: Script Generation ===\n")
-    print(f"Style: {args.style}")
+    if args.revision:
+        system_prompt += (
+            f"\n\n**REVISION REQUIRED** (fix these issues from script review):\n{args.revision}"
+        )
+
+    print("=== AI Talk Radio: Script Generation ===\n")
+    print(f"Style: {style}")
+    print(f"Host: {host_name}")
+    print(f"Duration: {duration} min")
     print(f"Read {len(research)} characters of research.")
     print("Generating script via Interactions API...\n")
 
@@ -192,15 +198,14 @@ def main():
 
     script = interaction.steps[-1].content[0].text
 
-    # Save
     out_path = os.path.join(args.workspace, "data", "script.md")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(script)
 
     word_count = len(script.split())
     print(f"✅ Script saved to {out_path}")
     print(f"   Word count: {word_count}")
-    print(f"\n--- Preview ---\n")
+    print("\n--- Preview ---\n")
     print(script[:800])
     if len(script) > 800:
         print(f"\n... ({len(script) - 800} more characters)")

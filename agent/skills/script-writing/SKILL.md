@@ -5,7 +5,7 @@ description: Generate the AI Talk Radio show script from research using the Inte
 
 # Script Writing
 
-Generate a naturalistic, multi-character radio show script directly via the LLM. The script features host Paul taking calls from people around the world, with advanced audio tags.
+Generate a naturalistic, multi-character radio show script directly via the LLM. Host, guests, segments, and features are driven by `show_config.json` via the `--config` flag.
 
 ## Embedded Script
 

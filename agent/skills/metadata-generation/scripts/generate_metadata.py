@@ -15,9 +15,14 @@ import argparse
 import os
 import json
 import re
+import sys
 from datetime import datetime
 from google import genai
 from pydub import AudioSegment
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
+from load_config import get_enabled_features, get_host_name, load_show_config  # noqa: E402
 
 def make_fallback_metadata(transcript_text, duration_str, today_date, output_path):
     print("Creating a premium local fallback metadata file...")
@@ -60,11 +65,46 @@ def make_fallback_metadata(transcript_text, duration_str, today_date, output_pat
         json.dump(fallback_data, f, indent=2)
     print(f"✅ Local fallback metadata saved successfully to {output_path}")
 
+def enrich_metadata(json_data, config, workspace):
+    """Add generation config, speakers, and quality report to metadata."""
+    host_name = get_host_name(config)
+    host_voice = config.get("host", {}).get("voice", "Puck")
+
+    speakers = [{"name": host_name, "role": "host", "voice": host_voice}]
+    for guest in config.get("guests", {}).get("roster", []):
+        if guest.get("name"):
+            speakers.append({
+                "name": guest["name"],
+                "role": "guest",
+                "voice": guest.get("voice"),
+            })
+
+    json_data["generation_config"] = {
+        "presetId": config.get("presetId"),
+        "style": config.get("structure", {}).get("style"),
+        "hostName": host_name,
+        "guestCount": config.get("guests", {}).get("count"),
+        "durationMinutes": config.get("durationMinutes"),
+        "mood": config.get("mood"),
+    }
+    json_data["speakers"] = speakers
+    json_data["features_enabled"] = get_enabled_features(config)
+
+    quality_path = os.path.join(workspace, "data", "quality_report.json")
+    if os.path.exists(quality_path):
+        with open(quality_path, encoding="utf-8") as f:
+            json_data["quality_report"] = json.load(f)
+
+    return json_data
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate AI Talk Radio show metadata")
     parser.add_argument("--workspace", default="workspace", help="Workspace directory")
+    parser.add_argument("--config", default=None, help="Path to show_config.json")
     args = parser.parse_args()
 
+    config = load_show_config(args.workspace, args.config)
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 
     # Paths
@@ -173,6 +213,7 @@ Return ONLY a valid JSON object. Do NOT wrap it in markdown code blocks. Ensure 
         # Validate JSON
         try:
             json_data = json.loads(response_text)
+            json_data = enrich_metadata(json_data, config, args.workspace)
 
             # Save
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

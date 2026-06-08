@@ -5,7 +5,7 @@ description: Convert radio show script to speech audio with telephone effect on 
 
 # TTS Generation
 
-Convert the radio show script into speech audio using the Gemini TTS model via the **Interactions API**. Apply a telephone bandpass filter to correspondent voices so they sound like phone call-ins, while keeping the host's voice clean studio-quality.
+Convert the radio show script into speech audio using the Gemini TTS model via the **Interactions API**. Voices, personas, and audio treatment (studio/phone/field) are configured via `--config ./workspace/data/show_config.json`.
 
 ## Embedded Script
 

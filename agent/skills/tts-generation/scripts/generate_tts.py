@@ -1,48 +1,25 @@
 #!/usr/bin/env python3
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Generate TTS audio with telephone effect on correspondent voices using the Interactions API.
-
-Usage:
-    python3 generate_tts.py --workspace ./workspace
-
-Requires:
-    pip install google-genai
-    ffmpeg (system)
-
-Output:
-    {workspace}/audio/speech/speech.wav
-"""
+"""Generate TTS audio with telephone effect on correspondent voices using the Interactions API."""
 
 import argparse
 import base64
+import json
 import os
 import re
 import subprocess
+import sys
 import time
 import wave
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from google import genai
 
-# Suppress experimental warnings from SDK
 warnings.filterwarnings("ignore", message="Interactions usage is experimental")
 
-# Voice mapping — each speaker gets a unique Gemini TTS voice
-VOICE_MAP = {
-    "Paul": "Puck",     # Host — studio quality male voice
-}
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
+from load_config import get_host_name, load_show_config  # noqa: E402
 
 FEMALE_VOICES = ["Kore"]
 MALE_VOICES = ["Charon", "Fenrir", "Puck"]
@@ -50,22 +27,61 @@ MALE_VOICES = ["Charon", "Fenrir", "Puck"]
 MAX_RETRIES = 3
 MAX_WORKERS = 8
 
-PROFILES = {
-    "Paul": {
-        "profile": "# AUDIO PROFILE: Paul\n## Role: Community Radio Host\n## Persona: Professional, warm, and engaging British radio host.",
-        "scene": "## THE SCENE: The London Studio\nA professional studio in London. Paul is sitting comfortably, speaking into a high-quality microphone with a warm and authoritative tone.",
-        "notes": "### DIRECTOR'S NOTES\nStyle: Professional, warm, engaging, and measured.\nPacing: Steady but dynamic.\nAccent: British English accent as heard in London, England.",
-    },
-    "default_caller": {
-        "profile": "# AUDIO PROFILE: Caller\n## Role: Tech-savvy individual calling in to a radio show.\n## Persona: Nerdy, conversational, not a professional broadcaster.",
-        "scene": "## THE SCENE: Remote Location via Phone\nCalling in from a home, office, or public space. The audio quality is that of a telephone call.",
-        "notes": "### DIRECTOR'S NOTES\nStyle: Conversational, natural.\nPacing: Normal conversational pace.\nAccent: American English.",
-    },
-}
+MARKER_LINES = {"[connect]", "[stinger]", "[hold]"}
+
+
+def build_profiles(config):
+    host = config.get("host", {})
+    host_name = get_host_name(config)
+    return {
+        host_name: {
+            "profile": (
+                f"# AUDIO PROFILE: {host_name}\n"
+                f"## Role: Community Radio Host\n"
+                f"## Persona: {host.get('persona', 'Professional radio host')}"
+            ),
+            "scene": "## THE SCENE: The Studio\nA professional broadcast studio with a high-quality microphone.",
+            "notes": (
+                f"### DIRECTOR'S NOTES\n"
+                f"Style: {host.get('delivery', 'measured')}.\n"
+                f"Pacing: Steady but dynamic.\n"
+                f"Accent: {host.get('accent', 'British English')}."
+            ),
+            "treatment": "studio",
+        },
+        "default_caller": {
+            "profile": "# AUDIO PROFILE: Caller\n## Role: Tech-savvy individual calling in to a radio show.",
+            "scene": "## THE SCENE: Remote Location via Phone\nCalling in from a home, office, or public space.",
+            "notes": "### DIRECTOR'S NOTES\nStyle: Conversational, natural.\nPacing: Normal conversational pace.\nAccent: American English.",
+            "treatment": "phone",
+        },
+    }
+
+
+def build_guest_profiles(config):
+    profiles = {}
+    roster = config.get("guests", {}).get("roster", [])
+    for guest in roster:
+        name = guest.get("name")
+        if not name:
+            continue
+        profiles[name] = {
+            "profile": (
+                f"# AUDIO PROFILE: {name}\n"
+                f"## Role: Radio show guest\n"
+                f"## Persona: {guest.get('persona', 'Tech-savvy caller')}"
+            ),
+            "scene": f"## THE SCENE: {guest.get('location', 'Remote location')}",
+            "notes": (
+                "### DIRECTOR'S NOTES\nStyle: Conversational, natural.\n"
+                f"Accent: Based on location — {guest.get('location', 'American English')}."
+            ),
+            "treatment": guest.get("audioTreatment", "phone"),
+        }
+    return profiles
 
 
 def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
-    """Save raw PCM data as a WAV file."""
     with wave.open(filename, "wb") as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(sample_width)
@@ -74,26 +90,25 @@ def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
 
 
 def split_script_by_turns(script_text):
-    """Parse script into ordered (speaker, text) turns."""
     turns = []
-    for line in script_text.strip().split('\n'):
+    for line in script_text.strip().split("\n"):
         line = line.strip()
-        if not line or line.startswith('#'):
+        if not line or line.startswith("#"):
             continue
-        if ':' in line:
-            speaker = line.split(':')[0].strip()
-            text = ':'.join(line.split(':')[1:]).strip()
+        if line in MARKER_LINES:
+            turns.append(("__marker__", line))
+            continue
+        if ":" in line:
+            speaker = line.split(":")[0].strip()
+            text = ":".join(line.split(":")[1:]).strip()
             if text:
                 turns.append((speaker, text))
     return turns
 
 
-def generate_tts_single(client, speaker, text, output_path, voice, accent):
-    """Generate TTS for a single speaker turn using the Interactions API."""
-    profile_data = PROFILES.get(speaker, PROFILES.get("default_caller", {}))
-
-    notes = profile_data.get('notes', '')
-    notes = re.sub(r'Accent:.*', f'Accent: {accent}', notes)
+def generate_tts_single(client, speaker, text, output_path, voice, accent, profile_data):
+    notes = profile_data.get("notes", "")
+    notes = re.sub(r"Accent:.*", f"Accent: {accent}", notes)
 
     prompt = f"""{profile_data.get('profile', '')}
 
@@ -123,112 +138,151 @@ def generate_tts_single(client, speaker, text, output_path, voice, accent):
                 pcm_data = base64.b64decode(item.data)
                 wave_file(output_path, pcm_data)
                 return True
-
     return False
 
 
-def apply_telephone_filter(input_path, output_path, boost=False):
-    """Apply telephone bandpass filter (300Hz-3400Hz) via ffmpeg.
-
-    Simulates a phone call:
-    1. Highpass at 300Hz — cuts rumble
-    2. Lowpass at 3400Hz — cuts highs (telephone bandwidth)
-    3. Compression — mimics phone codec dynamics
-    4. Volume adjustment (boosted if requested)
-    """
+def apply_telephone_filter(input_path, output_path, boost=False, field=False):
     vol = "1.8" if boost else "1.5"
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-loglevel", "warning",
-        "-i", input_path,
-        "-af", (
+    if field:
+        af = (
+            "highpass=f=200,"
+            "lowpass=f=2800,"
+            "aecho=0.8:0.9:40:0.3,"
+            "acompressor=threshold=-20dB:ratio=4:attack=5:release=50,"
+            f"volume={vol}"
+        )
+    else:
+        af = (
             "highpass=f=300,"
             "lowpass=f=3400,"
             "acompressor=threshold=-20dB:ratio=4:attack=5:release=50,"
             f"volume={vol}"
-        ),
-        output_path
-    ], check=True, capture_output=True)
+        )
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "warning", "-i", input_path, "-af", af, output_path],
+        check=True,
+        capture_output=True,
+    )
 
 
-def concatenate_wav_files(file_list, output_path):
-    """Concatenate WAV files (same format) into one."""
-    all_pcm = b""
-    for f in file_list:
-        with wave.open(f, "rb") as wf:
-            all_pcm += wf.readframes(wf.getnframes())
-    wave_file(output_path, all_pcm)
+def get_treatment(speaker, host_name, profiles, config):
+    if speaker == host_name:
+        return "studio"
+    if speaker in profiles:
+        return profiles[speaker].get("treatment", "phone")
+    if config.get("features", {}).get("coHost") and "co" in speaker.lower():
+        return "studio"
+    return "phone"
 
 
-def process_turn(client, turn_index, speaker, text, voice, accent, segments_dir, boost=False):
-    """Generate TTS for a single turn with retries and post-processing.
+def process_turn(client, turn_index, speaker, text, voice, accent, segments_dir, profiles, host_name, config, boost=False):
+    if speaker == "__marker__":
+        marker_path = os.path.join(segments_dir, f"turn_{turn_index:03d}_marker.txt")
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return (turn_index, None)
 
-    Returns (turn_index, final_path) on success, or (turn_index, None) on failure.
-    """
     raw_path = os.path.join(segments_dir, f"turn_{turn_index:03d}_raw.wav")
     final_path = os.path.join(segments_dir, f"turn_{turn_index:03d}.wav")
 
-    # Generate TTS with retries
+    profile_data = profiles.get(speaker, profiles.get("default_caller", {}))
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            success = generate_tts_single(client, speaker, text, raw_path, voice, accent)
+            success = generate_tts_single(client, speaker, text, raw_path, voice, accent, profile_data)
             if success:
                 break
             print(f"    [{turn_index}] Attempt {attempt}/{MAX_RETRIES}: no audio returned")
         except Exception as e:
             print(f"    [{turn_index}] Attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
-                time.sleep(2 * attempt)  # Exponential-ish backoff
+                time.sleep(2 * attempt)
     else:
         print(f"    [{turn_index}] ✗ All {MAX_RETRIES} attempts failed, skipping")
         return (turn_index, None)
 
-    # Apply telephone filter for callers (not Paul)
-    if speaker != "Paul":
+    treatment = get_treatment(speaker, host_name, profiles, config)
+
+    if treatment == "studio":
+        os.rename(raw_path, final_path)
+        print(f"    [{turn_index}] ✓ {speaker} ({voice}) clean studio")
+    else:
         try:
-            apply_telephone_filter(raw_path, final_path, boost=boost)
-            print(f"    [{turn_index}] ✓ {speaker} ({voice}) + telephone filter{' (boosted)' if boost else ''}")
+            apply_telephone_filter(
+                raw_path,
+                final_path,
+                boost=boost,
+                field=(treatment == "field"),
+            )
+            print(f"    [{turn_index}] ✓ {speaker} ({voice}) + {treatment} filter")
         except Exception:
             os.rename(raw_path, final_path)
             print(f"    [{turn_index}] ✓ {speaker} ({voice}) (filter failed, using raw)")
-    else:
-        os.rename(raw_path, final_path)
-        print(f"    [{turn_index}] ✓ {speaker} ({voice}) clean studio")
 
     return (turn_index, final_path)
+
+
+def concatenate_wav_files(file_list, output_path, gap_ms=300):
+    if not file_list:
+        return
+
+    gap_pcm = b"\x00\x00" * int(24000 * gap_ms / 1000)
+    all_pcm = b""
+    for i, fpath in enumerate(file_list):
+        with wave.open(fpath, "rb") as wf:
+            all_pcm += wf.readframes(wf.getnframes())
+        if i < len(file_list) - 1:
+            all_pcm += gap_pcm
+
+    wave_file(output_path, all_pcm)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate TTS with telephone effect")
     parser.add_argument("--workspace", default="workspace", help="Workspace directory")
+    parser.add_argument("--config", default=None, help="Path to show_config.json")
     parser.add_argument("--workers", type=int, default=MAX_WORKERS, help="Max parallel TTS workers")
     args = parser.parse_args()
 
+    config = load_show_config(args.workspace, args.config)
+    host_name = get_host_name(config)
+    host_voice = config.get("host", {}).get("voice", "Puck")
+
+    profiles = build_profiles(config)
+    profiles.update(build_guest_profiles(config))
+
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 
-    # Read script
     script_path = os.path.join(args.workspace, "data", "script.md")
-    with open(script_path) as f:
+    with open(script_path, encoding="utf-8") as f:
         script = f.read()
 
     turns = split_script_by_turns(script)
-    print(f"=== AI Talk Radio: TTS Generation ===\n")
-    print(f"Found {len(turns)} speaker turns")
+    print("=== AI Talk Radio: TTS Generation ===\n")
+    print(f"Found {len(turns)} turns (host: {host_name})")
     print(f"Generating in parallel with {args.workers} workers\n")
 
     segments_dir = os.path.join(args.workspace, "audio", "speech", "segments")
     os.makedirs(segments_dir, exist_ok=True)
 
-    # --- Phase 1: Parse all turns and assign voices (sequential) ---
-    assigned_voices = {"Paul": "Puck"}
-    assigned_accents = {"Paul": "British English accent as heard in London, England"}
+    assigned_voices = {host_name: host_voice}
+    assigned_accents = {host_name: config.get("host", {}).get("accent", "British English")}
     female_index = 0
     male_index = 0
     prepared_turns = []
 
+    roster_voices = {}
+    for guest in config.get("guests", {}).get("roster", []):
+        if guest.get("name") and guest.get("voice"):
+            roster_voices[guest["name"]] = guest["voice"]
+
     for i, (speaker, text) in enumerate(turns):
-        # Parse gender tag
-        gender = "Male"  # default
+        if speaker == "__marker__":
+            prepared_turns.append((i, speaker, text, "", "", False))
+            continue
+
+        gender = "Male"
         if "[Female]" in text:
             gender = "Female"
             text = text.replace("[Female]", "").strip()
@@ -236,25 +290,25 @@ def main():
             gender = "Male"
             text = text.replace("[Male]", "").strip()
 
-        # Parse accent tag
-        accent = "American English"  # default
-        accent_match = re.search(r'\[Accent: ([^\]]+)\]', text)
+        accent = "American English"
+        accent_match = re.search(r"\[Accent: ([^\]]+)\]", text)
         if accent_match:
             accent = accent_match.group(1)
-            text = re.sub(r'\[Accent: [^\]]+\]', '', text).strip()
+            text = re.sub(r"\[Accent: [^\]]+\]", "", text).strip()
 
-        # Parse boost tag
-        boost = False
-        if "[boost]" in text:
-            boost = True
+        boost = "[boost]" in text
+        if boost:
             text = text.replace("[boost]", "").strip()
 
         if speaker not in assigned_voices:
-            if gender == "Female":
+            if speaker in roster_voices:
+                assigned_voices[speaker] = roster_voices[speaker]
+            elif gender == "Female":
                 assigned_voices[speaker] = FEMALE_VOICES[female_index % len(FEMALE_VOICES)]
                 female_index += 1
             else:
-                assigned_voices[speaker] = MALE_VOICES[male_index % len(MALE_VOICES)]
+                pool = [v for v in MALE_VOICES if v != host_voice or speaker == host_name]
+                assigned_voices[speaker] = pool[male_index % len(pool)]
                 male_index += 1
 
         if speaker not in assigned_accents:
@@ -262,29 +316,50 @@ def main():
 
         voice = assigned_voices[speaker]
         accent = assigned_accents[speaker]
-
         prepared_turns.append((i, speaker, text, voice, accent, boost))
-        print(f"  [{i+1}/{len(turns)}] {speaker} ({voice}, {accent}){' [boost]' if boost else ''}: {text[:60]}...")
+        print(f"  [{i+1}/{len(turns)}] {speaker} ({voice}): {text[:60]}...")
 
-    # --- Phase 2: Generate TTS in parallel ---
-    print(f"\nStarting parallel generation...")
+    markers = []
+    for i, (speaker, text) in enumerate(turns):
+        if speaker == "__marker__":
+            markers.append({"index": i, "marker": text})
+
+    markers_path = os.path.join(args.workspace, "data", "script_markers.json")
+    with open(markers_path, "w", encoding="utf-8") as f:
+        json.dump(markers, f)
+
+    print("\nStarting parallel generation...")
     results = {}
+
+    tts_turns = [(i, s, t, v, a, b) for i, s, t, v, a, b in prepared_turns if s != "__marker__"]
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
-                process_turn, client, i, speaker, text, voice, accent, segments_dir, boost
+                process_turn,
+                client,
+                i,
+                speaker,
+                text,
+                voice,
+                accent,
+                segments_dir,
+                profiles,
+                host_name,
+                config,
+                boost,
             ): i
-            for i, speaker, text, voice, accent, boost in prepared_turns
+            for i, speaker, text, voice, accent, boost in tts_turns
         }
 
         for future in as_completed(futures):
             turn_index, final_path = future.result()
             results[turn_index] = final_path
 
-    # --- Phase 3: Concatenate in original order ---
     segment_files = []
-    for i in range(len(turns)):
+    for i, (speaker, _text) in enumerate(turns):
+        if speaker == "__marker__":
+            continue
         path = results.get(i)
         if path is not None:
             segment_files.append(path)
@@ -292,18 +367,17 @@ def main():
     output_path = os.path.join(args.workspace, "audio", "speech", "speech.wav")
     concatenate_wav_files(segment_files, output_path)
 
-    # Stats
-    with wave.open(output_path, "rb") as wf:
-        duration = wf.getnframes() / wf.getframerate()
-
-    failed = len(turns) - len(segment_files)
-    print(f"\n✅ TTS complete!")
-    print(f"   Output: {output_path}")
-    print(f"   Duration: {duration:.1f}s | Segments: {len(segment_files)}/{len(turns)}", end="")
-    if failed:
-        print(f" ({failed} failed)")
-    else:
-        print()
+    if os.path.exists(output_path):
+        with wave.open(output_path, "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
+        failed = len(tts_turns) - len(segment_files)
+        print("\n✅ TTS complete!")
+        print(f"   Output: {output_path}")
+        print(f"   Duration: {duration:.1f}s | Segments: {len(segment_files)}/{len(tts_turns)}", end="")
+        if failed:
+            print(f" ({failed} failed)")
+        else:
+            print()
 
 
 if __name__ == "__main__":

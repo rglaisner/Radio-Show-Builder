@@ -4,6 +4,26 @@ export interface RawTranscriptLine {
   text: string;
 }
 
+export interface SpeakerInfo {
+  name: string;
+  role: "host" | "guest" | "co-host" | "reporter";
+  voice?: string;
+}
+
+export interface QualityReportSummary {
+  passed: boolean;
+  duration_delta_pct?: number;
+  warnings?: string[];
+}
+
+export interface GenerationConfigSummary {
+  presetId?: string;
+  style?: string;
+  hostName?: string;
+  guestCount?: number;
+  featuresEnabled?: string[];
+}
+
 export interface RawRadioShow {
   show_title: string;
   show_duration: string; // "MM:SS"
@@ -13,6 +33,10 @@ export interface RawRadioShow {
   coverImage?: string; // Added for UI
   audioUrl?: string;   // Added for playback
   notesUrl?: string;   // Added for downloading show notes
+  speakers?: SpeakerInfo[];
+  generation_config?: GenerationConfigSummary;
+  features_enabled?: string[];
+  quality_report?: QualityReportSummary;
 }
 
 export interface TranscriptLine {
@@ -35,4 +59,8 @@ export interface RadioShow {
   shareId?: string;
   shareUrl?: string;
   isUserGenerated?: boolean;
+  speakers?: SpeakerInfo[];
+  generationConfig?: GenerationConfigSummary;
+  featuresEnabled?: string[];
+  qualityReport?: QualityReportSummary;
 }

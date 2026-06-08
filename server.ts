@@ -3,6 +3,9 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { createInteraction, streamInteraction, API_BASE_URL } from "./server/lib/agentClient.ts";
 import { extractJsonBlocks } from "./server/lib/jsonExtractor.ts";
+import { parseShowConfigRequest } from "./src/showConfig.ts";
+import { buildAgentPrompt, serializeShowConfig } from "./server/lib/showConfigPrompt.ts";
+import { ZodError } from "zod";
 import { exec } from 'child_process';
 import util from 'util';
 import fs from "fs";
@@ -567,7 +570,25 @@ async function startServer() {
     // Run background cleanup list whenever a new show is request to optimize disk space
     cleanUpOldGenerations();
 
-    const { topic, duration = "15", mood = "Informative", generationId } = req.body;
+    const { generationId } = req.body;
+
+    let showConfig;
+    try {
+      showConfig = parseShowConfigRequest(req.body);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return res.status(400).json({
+          error: "Invalid show configuration",
+          details: error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          })),
+        });
+      }
+      return res.status(400).json({
+        error: error instanceof Error ? error.message : "Invalid show configuration",
+      });
+    }
 
     if (process.env.NODE_ENV !== "production") {
       console.log(`[generate-show] Running in dev mode, skipping daily quota tracking.`);
@@ -584,7 +605,7 @@ async function startServer() {
       }
     }
 
-    const prompt = `Generate a radio station about: ${topic}. Target duration: ${duration} minutes. Set the tone and style of the show to: ${mood}. Follow the workflow in AGENTS.md to research, write, generate speech and music, mix the audio, and generate the metadata.`;
+    const prompt = buildAgentPrompt(showConfig);
 
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -621,13 +642,20 @@ async function startServer() {
     });
 
     try {
-      console.log(`[generate-show] Request received for topic: "${topic}", duration: "${duration}", mood: "${mood}", generationId: "${generationId}"`);
+      console.log(
+        `[generate-show] Request received for topic: "${showConfig.topic}", duration: "${showConfig.durationMinutes}", mood: "${showConfig.mood}", preset: "${showConfig.presetId ?? "none"}", generationId: "${generationId}"`
+      );
       console.log(`[generate-show] GEMINI_API_KEY presence verified: ${!!process.env.GEMINI_API_KEY}`);
       sendEvent({ type: "info", message: "Provisioning environment..." });
 
       console.log(`[generate-show] Loading agent files from filesystem path: ${path.join(process.cwd(), "agent")}`);
       const agentFiles = loadAgentFiles(path.join(process.cwd(), "agent"), "/.agents");
-      console.log(`[generate-show] Finished loading agent files recursively. Count: ${agentFiles.length}`);
+      agentFiles.push({
+        type: "inline",
+        content: serializeShowConfig(showConfig),
+        target: "/workspace/data/show_config.json",
+      });
+      console.log(`[generate-show] Finished loading agent files recursively. Count: ${agentFiles.length} (includes show_config.json)`);
 
       console.log(`[generate-show] Calling createInteraction with prompt: "${prompt.substring(0, 100)}..."`);
       const response = await createInteraction({
