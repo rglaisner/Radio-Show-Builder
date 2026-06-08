@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Play, Pause, Volume2, Info, List, ChevronDown, ChevronUp, Sparkles, Settings2, Clock, Radio,
-  TerminalSquare, CheckCircle2, Loader2, Bot, Download, Lock, Key, ShieldAlert, Check,
+  TerminalSquare, CheckCircle2, Loader2, Download, Lock, Key, ShieldAlert, Check,
   HelpCircle, User, AlertCircle, RefreshCw, Trash2, ChevronLeft, Share2, Copy, ExternalLink, Globe
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
@@ -11,6 +11,19 @@ import firebaseConfig from '../firebase-applet-config.json';
 import { MOCK_SHOW, transformShow } from './data';
 import { Transcript } from './components/Transcript';
 import { GuestRosterEditor } from './components/GuestRosterEditor';
+import { RainbowBackground } from './components/RainbowBackground';
+import { LoadingScreen } from './components/LoadingScreen';
+import { AuraTorquePulsarSpinner } from './components/AuraTorquePulsarSpinner';
+import { GenerationProgressBar } from './components/GenerationProgressBar';
+import { ShowReadyScreen } from './components/ShowReadyScreen';
+import {
+  INITIAL_GENERATION_PROGRESS,
+  finalizingProgress,
+  progressFromInfoMessage,
+  progressFromToolCall,
+  progressFromToolResult,
+  type GenerationProgress,
+} from './generationProgress';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
 import { z } from 'zod';
 import {
@@ -156,19 +169,6 @@ const getAIStudioBuildUrl = (appletId: string): string => {
   return `${baseDomain}/build?clone=${appletId}`;
 };
 
-const RainbowBackground = () => (
-  <>
-    <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
-      <div className="absolute -top-[20%] -left-[10%] w-[70vw] h-[70vh] rounded-full bg-[#ff00a2]/40 mix-blend-screen filter blur-[120px] animate-blob" />
-      <div className="absolute top-[10%] -right-[10%] w-[60vw] h-[60vh] rounded-full bg-[#143dff]/40 mix-blend-screen filter blur-[120px] animate-blob animation-delay-2000" />
-      <div className="absolute -bottom-[20%] left-[10%] w-[70vw] h-[70vh] rounded-full bg-[#43ff0d]/30 mix-blend-screen filter blur-[120px] animate-blob animation-delay-4000" />
-      <div className="absolute -bottom-[10%] -right-[10%] w-[60vw] h-[60vh] rounded-full bg-[#ffc500]/30 mix-blend-screen filter blur-[120px] animate-blob animation-delay-6000" />
-      <div className="absolute top-[30%] left-[30%] w-[50vw] h-[50vh] rounded-full bg-[#ff2a2a]/30 mix-blend-screen filter blur-[120px] animate-blob animation-delay-3000" />
-    </div>
-    <div className="absolute inset-0 bg-black/50 backdrop-blur-[60px] z-0 pointer-events-none" />
-  </>
-);
-
 export default function App() {
   const [view, setView] = useState<'home' | 'player' | 'generating'>('home');
   const [selectedShow, setSelectedShow] = useState(MOCK_SHOW);
@@ -218,6 +218,9 @@ export default function App() {
 
   const [generationComplete, setGenerationComplete] = useState(false);
   const [currentStage, setCurrentStage] = useState('Initializing...');
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgress>(INITIAL_GENERATION_PROGRESS);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [showGenerationLog, setShowGenerationLog] = useState(false);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const [hasQuotaError, setHasQuotaError] = useState(false);
@@ -316,6 +319,11 @@ export default function App() {
     const secs = totalSeconds % 60;
     if (mins > 0) return `${mins}m ${secs}s`;
     return `${secs}s`;
+  };
+
+  const applyProgressUpdate = (next: GenerationProgress) => {
+    setGenerationProgress(next);
+    setCurrentStage(next.subLabel ?? next.stepLabel);
   };
 
   const scrubText = (text: string) => {
@@ -1099,6 +1107,9 @@ export default function App() {
     setElapsedTime(0);
     setGenerationComplete(false);
     setCurrentStage('Initializing...');
+    setGenerationProgress(INITIAL_GENERATION_PROGRESS);
+    setIsFinalizing(false);
+    setShowGenerationLog(false);
 
     let generatedShow: typeof MOCK_SHOW | null = null;
 
@@ -1231,7 +1242,13 @@ export default function App() {
             const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
 
             if (event.type === "info" || event.type === "error") {
-               if (event.message?.includes('Downloading')) setCurrentStage('Extracting final files...');
+               if (event.type === "info" && typeof event.message === 'string') {
+                 setGenerationProgress((prev) => {
+                   const next = progressFromInfoMessage(event.message, prev);
+                   setCurrentStage(next.subLabel ?? next.stepLabel);
+                   return next;
+                 });
+               }
                if (event.type === "error" && (
                  event.message?.toLowerCase().includes("quota") || 
                  event.message?.toLowerCase().includes("too_many_requests") || 
@@ -1280,24 +1297,9 @@ export default function App() {
                });
             } else if (event.type === "tool_call") {
                console.log("[Client] Processing tool_call event:", event.name, "with args:", event.arguments);
-               if (event.name === 'code_execution_call' || event.name === 'bash') {
-                 const cmd = (event.arguments?.command || event.arguments?.code || "") as string;
-                 if (cmd.includes('fetch_hn.py') || cmd.includes('fetch_github.py') || cmd.includes('fetch_url.py')) setCurrentStage('Researching topic...');
-                 else if (cmd.includes('generate_script.py')) setCurrentStage('Writing script...');
-                 else if (cmd.includes('generate_tts.py')) setCurrentStage('Generating speech...');
-                 else if (cmd.includes('generate_music.py')) setCurrentStage('Generating music...');
-                 else if (cmd.includes('mix_audio.py')) setCurrentStage('Mixing audio...');
-                 else if (cmd.includes('generate_metadata.py')) setCurrentStage('Generating metadata...');
-                 else if (cmd.includes('generate_image.py')) setCurrentStage('Generating cover image...');
-               } else if (event.name === 'read_file' && event.arguments?.path) {
-                 const path = event.arguments.path as string;
-                 if (path.includes('skills/research')) setCurrentStage('Preparing research...');
-                 else if (path.includes('skills/script-writing')) setCurrentStage('Preparing script...');
-                 else if (path.includes('skills/tts-generation')) setCurrentStage('Preparing speech generation...');
-                 else if (path.includes('skills/music-generation')) setCurrentStage('Preparing music generation...');
-                 else if (path.includes('skills/audio-mixing')) setCurrentStage('Preparing audio mixing...');
-                 else if (path.includes('skills/metadata-generation')) setCurrentStage('Preparing metadata...');
-                 else if (path.includes('skills/cover-image-generation')) setCurrentStage('Preparing cover image...');
+               const toolProgress = progressFromToolCall(event.name, event.arguments);
+               if (toolProgress) {
+                 applyProgressUpdate(toolProgress);
                }
 
                setGenerationLogs(prev => [...prev, {
@@ -1307,6 +1309,11 @@ export default function App() {
                console.log("[Client] Processing tool_result event for:", event.name);
                let resultText = event.result || "";
                if (resultText.length > 4000) resultText = resultText.substring(0, 4000) + "...";
+               setGenerationProgress((prev) => {
+                 const next = progressFromToolResult(event.name, resultText, prev);
+                 setCurrentStage(next.subLabel ?? next.stepLabel);
+                 return next;
+               });
                setGenerationLogs(prev => [...prev, {
                  id: Math.random().toString(), timestamp, type: 'tool_result', name: event.name, result: resultText
                }]);
@@ -1323,13 +1330,12 @@ export default function App() {
         }
       }
 
-      // Add a slight delay for dramatic effect
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      setIsFinalizing(true);
+      applyProgressUpdate(finalizingProgress());
 
       if (generatedShow) {
         const userShow = { ...generatedShow, isUserGenerated: true };
-        
-        // Persist to user's IndexedDB database
+
         try {
           await saveUserShow(userShow);
         } catch (e) {
@@ -1338,13 +1344,21 @@ export default function App() {
 
         setSelectedShow(userShow);
         setLibrary(prev => [userShow, ...prev]);
-        setGenerationComplete(true);
         setPrompt('');
         refreshQuota();
       }
 
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (generatedShow) {
+        setGenerationComplete(true);
+      }
+
+      setIsFinalizing(false);
+
+    } catch (error: unknown) {
+      setIsFinalizing(false);
+      if (error instanceof Error && error.name === 'AbortError') {
         console.log("Generation aborted by user");
         setGenerationLogs(prev => [...prev, {
           id: Math.random().toString(), timestamp: new Date().toISOString().split('T')[1].split('.')[0], type: 'info', content: 'Generation stopped by user.'
@@ -1362,6 +1376,7 @@ export default function App() {
     }
 
     setIsGenerating(false);
+    setIsFinalizing(false);
   };
 
   const handleStop = async () => {
@@ -1380,6 +1395,13 @@ export default function App() {
       }
     }
     setIsGenerating(false);
+    setIsFinalizing(false);
+  };
+
+  const resetGenerationSession = () => {
+    setGenerationComplete(false);
+    setShowGenerationLog(false);
+    setIsFinalizing(false);
   };
 
   const selectShow = (show: typeof MOCK_SHOW) => {
@@ -1426,42 +1448,231 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (scrollRef.current && view === 'generating' && isScrolledToBottom) {
+    if (scrollRef.current && view === 'generating' && isScrolledToBottom && !generationComplete) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [generationLogs, view, isScrolledToBottom]);
+  }, [generationLogs, view, isScrolledToBottom, generationComplete]);
+
+  const renderGenerationLogEntries = () => (
+    <AnimatePresence>
+      {generationLogs.map((log) => {
+        if (log.type === 'tool_call' && (!log.args || Object.keys(log.args).length === 0)) {
+          return null;
+        }
+
+        let prefix = 'Info';
+        let color = 'text-white/60';
+        let Icon = Info;
+
+        if (log.type === 'tool_call') {
+          prefix = 'Action';
+          color = 'text-io-blue';
+          Icon = Settings2;
+        } else if (log.type === 'tool_result') {
+          prefix = 'Result';
+          color = 'text-io-green';
+          Icon = CheckCircle2;
+        } else if (log.type === 'thinking' || log.type === 'text') {
+          prefix = 'Log';
+          color = 'text-white/80';
+          Icon = TerminalSquare;
+        } else if (log.type === 'error') {
+          prefix = 'Error';
+          color = 'text-red-400';
+          Icon = Info;
+        }
+
+        return (
+          <motion.div
+            key={log.id}
+            initial={{ opacity: 0, x: -10 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="flex gap-4 md:gap-6 font-mono text-xs md:text-sm group"
+          >
+            <div className="w-16 shrink-0 text-white/40 text-right pt-0.5">
+              {log.timestamp}
+            </div>
+            <div className="flex gap-3 w-28 shrink-0 items-start pt-0.5">
+              <Icon className={`w-4 h-4 ${color} shrink-0`} />
+              <span className={`${color} font-bold uppercase tracking-wider text-[10px] mt-0.5 w-full`}>{prefix}</span>
+            </div>
+            <div className="flex-1 break-words whitespace-pre-wrap text-white/80 leading-relaxed max-w-2xl bg-white/[0.02] px-3 py-2 -mt-2 rounded border border-transparent hover:border-white/5 transition-colors">
+              {log.type === 'tool_call' ? (
+                <div className="space-y-2">
+                  <div className="font-bold text-io-blue">{humanizeToolName(log.name || '')}</div>
+                  {log.name === 'read_file' && log.args?.path ? (
+                    <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
+                      <span className="text-white/40">path:</span> {log.args.path}
+                    </div>
+                  ) : log.name === 'list_files' && log.args?.path ? (
+                    <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
+                      <span className="text-white/40">path:</span> {log.args.path}
+                    </div>
+                  ) : log.args && log.args.command ? (
+                    <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
+                      {scrubText(log.args.command)}
+                    </pre>
+                  ) : log.args && log.args.code ? (
+                    <div className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto font-mono text-[10px] border border-white/5">
+                      {log.args.language && <div className="text-white/40 mb-1">{log.args.language}</div>}
+                      <pre className="whitespace-pre-wrap">{scrubText(log.args.code)}</pre>
+                    </div>
+                  ) : log.args && Object.keys(log.args).length > 0 ? (
+                    <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
+                      {scrubText(JSON.stringify(log.args, null, 2))}
+                    </pre>
+                  ) : null}
+                </div>
+              ) : log.type === 'tool_result' ? (
+                <div className="space-y-2">
+                  <div className={`font-bold ${log.result?.includes('"error"') || log.result?.startsWith('Error:') ? 'text-red-400' : 'text-io-green'}`}>
+                    Result: {humanizeToolName(log.name || 'output')}
+                  </div>
+                  {formatToolResult(log.name, log.result)}
+                </div>
+              ) : (
+                renderMarkdown(scrubText(log.content || ''))
+              )}
+            </div>
+          </motion.div>
+        );
+      })}
+    </AnimatePresence>
+  );
+
+  const generationLogPanel = (
+    <div className="flex flex-col min-h-0 flex-1">
+      <div className="h-10 border-b border-white/5 flex items-center px-4 bg-white/[0.02] shrink-0">
+        <span className="font-mono text-[10px] text-white/30 uppercase tracking-widest font-bold">Process Log</span>
+      </div>
+      <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-4 min-h-0">
+        {renderGenerationLogEntries()}
+      </div>
+    </div>
+  );
+
+  const generationElapsedFooter = startTime ? (
+    <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest">
+      Elapsed: {formatElapsed(elapsedTime)} <span className="opacity-30">/</span>{' '}
+      <span className="text-io-blue font-bold">Est: ~5 mins</span>
+    </p>
+  ) : null;
 
   if (view === 'generating') {
+    if (generationComplete) {
+      return (
+        <ShowReadyScreen
+          show={selectedShow}
+          activePrompt={activePrompt}
+          showLog={showGenerationLog}
+          onToggleLog={() => setShowGenerationLog((v) => !v)}
+          onListenNow={() => {
+            setView('player');
+            resetGenerationSession();
+          }}
+          onBackToHome={() => {
+            setView('home');
+            resetGenerationSession();
+          }}
+          onDownloadLogs={downloadLogs}
+          logPanel={generationLogPanel}
+        />
+      );
+    }
+
+    if (isFinalizing || (isGenerating && generationLogs.length === 0)) {
+      return (
+        <LoadingScreen
+          title={isFinalizing ? 'Finalizing your show…' : currentStage}
+          subtitle={`Creating custom radio show about: "${activePrompt}"`}
+        >
+          <GenerationProgressBar progress={generationProgress} finalizing={isFinalizing} />
+          {generationElapsedFooter}
+          {!isFinalizing ? (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl font-bold text-xs tracking-widest uppercase transition-colors border border-red-500/20 cursor-pointer"
+            >
+              Stop Agent
+            </button>
+          ) : null}
+        </LoadingScreen>
+      );
+    }
+
+    if (!isGenerating && !isFinalizing) {
+      return (
+        <div className="fixed inset-0 w-full h-full bg-black text-white flex flex-col items-center justify-center p-6 overflow-hidden">
+          <RainbowBackground />
+          <div className="relative z-10 w-full max-w-lg space-y-6 text-center">
+            <div className="rounded-3xl bg-white/[0.04] border border-white/10 backdrop-blur-md p-8 space-y-6">
+              <h2 className="text-xl font-bold text-white/90">Generation ended</h2>
+              {hasQuotaError ? (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 rounded-2xl bg-red-400/10 border border-red-500/20 text-left space-y-3"
+                >
+                  <div className="flex items-center gap-2 text-red-300 font-bold text-xs uppercase">
+                    <ShieldAlert className="w-4 h-4" />
+                    Quota limit reached
+                  </div>
+                  <p className="text-white/75 text-xs leading-relaxed">
+                    The Gemini API key has run out of quota. Add a billed key in Settings &gt; Secrets as GEMINI_API_KEY.
+                  </p>
+                </motion.div>
+              ) : null}
+              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setView('home');
+                    resetGenerationSession();
+                  }}
+                  className="px-8 py-3 bg-white text-black rounded-xl font-bold text-sm tracking-widest uppercase cursor-pointer"
+                >
+                  Go Back
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadLogs}
+                  className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-bold text-sm tracking-widest uppercase cursor-pointer"
+                >
+                  Download Logs
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="fixed inset-0 w-full h-full bg-black text-white flex flex-col items-center justify-center p-6 overflow-hidden pb-10">
         <RainbowBackground />
 
         <div className="w-full max-w-4xl relative z-10 flex flex-col h-full overflow-hidden">
-          <div className="text-center space-y-4 mb-8 shrink-0 mt-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-white/5 border border-white/10 shadow-2xl relative mb-4">
-              <div className="absolute inset-0 rounded-full border border-io-blue/30 animate-[spin_4s_linear_infinite]" />
-              <Bot className="w-8 h-8 text-io-blue animate-pulse" />
+          <div className="text-center space-y-4 mb-6 shrink-0 mt-6">
+            <div className="flex justify-center mb-2">
+              <AuraTorquePulsarSpinner size={80} />
             </div>
-
-            <h2 className="text-2xl font-bold tracking-tight text-white/90">
-              {generationComplete ? "Show Ready" : currentStage}
-            </h2>
-            <p className="text-white/40 font-medium text-sm max-w-lg mx-auto">Creating custom radio show about: "{activePrompt}"</p>
+            <h2 className="text-xl font-bold tracking-tight text-white/90">{currentStage}</h2>
+            <p className="text-white/40 font-medium text-sm max-w-lg mx-auto">
+              Creating custom radio show about: &ldquo;{activePrompt}&rdquo;
+            </p>
+            <GenerationProgressBar progress={generationProgress} compact finalizing={isFinalizing} />
           </div>
 
-          <div className="flex-1 overflow-hidden relative rounded-3xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl flex flex-col">
+          <div className="flex-1 overflow-hidden relative rounded-3xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl flex flex-col min-h-0">
             <div className="h-12 border-b border-white/5 flex items-center px-6 gap-2 bg-white/[0.02] shrink-0 justify-between">
-               <div className="flex items-center gap-2">
-                 <div className="w-3 h-3 rounded-full bg-white/20" />
-                 <div className="w-3 h-3 rounded-full bg-white/20" />
-                 <div className="w-3 h-3 rounded-full bg-white/20" />
-                 <span className="font-mono text-[10px] text-white/30 uppercase tracking-widest ml-4 font-bold">Process Log</span>
-               </div>
-               {startTime && (
-                 <div className="font-mono text-[10px] text-white/45 uppercase tracking-widest font-medium">
-                   Elapsed: {formatElapsed(elapsedTime)} <span className="opacity-30">/</span> <span className="text-io-blue font-bold">Est: ~5 mins</span>
-                 </div>
-               )}
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full bg-white/20" />
+                <div className="w-3 h-3 rounded-full bg-white/20" />
+                <div className="w-3 h-3 rounded-full bg-white/20" />
+                <span className="font-mono text-[10px] text-white/30 uppercase tracking-widest ml-4 font-bold">Process Log</span>
+              </div>
+              {generationElapsedFooter}
             </div>
 
             <div
@@ -1469,178 +1680,20 @@ export default function App() {
               onScroll={handleScroll}
               className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-4"
             >
-              <AnimatePresence>
-                {generationLogs.map((log) => {
-                  if (log.type === 'tool_call' && (!log.args || Object.keys(log.args).length === 0)) {
-                    return null;
-                  }
-
-                  let prefix = 'Info';
-                  let color = 'text-white/60';
-                  let Icon = Info;
-
-                  if (log.type === 'tool_call') {
-                     prefix = 'Action';
-                     color = 'text-io-blue';
-                     Icon = Settings2;
-                  } else if (log.type === 'tool_result') {
-                     prefix = 'Result';
-                     color = 'text-io-green';
-                     Icon = CheckCircle2;
-                  } else if (log.type === 'thinking' || log.type === 'text') {
-                     prefix = 'Log';
-                     color = 'text-white/80';
-                     Icon = TerminalSquare;
-                  } else if (log.type === 'error') {
-                     prefix = 'Error';
-                     color = 'text-red-400';
-                     Icon = Info;
-                  }
-
-                  return (
-                    <motion.div
-                      key={log.id}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className="flex gap-4 md:gap-6 font-mono text-xs md:text-sm group"
-                    >
-                      <div className="w-16 shrink-0 text-white/40 text-right pt-0.5">
-                        {log.timestamp}
-                      </div>
-                      <div className="flex gap-3 w-28 shrink-0 items-start pt-0.5">
-                         <Icon className={`w-4 h-4 ${color} shrink-0`} />
-                         <span className={`${color} font-bold uppercase tracking-wider text-[10px] mt-0.5 w-full`}>{prefix}</span>
-                      </div>
-                      <div className="flex-1 break-words whitespace-pre-wrap text-white/80 leading-relaxed max-w-2xl bg-white/[0.02] px-3 py-2 -mt-2 rounded border border-transparent hover:border-white/5 transition-colors">
-                        {log.type === 'tool_call' ? (
-                          <div className="space-y-2">
-                            <div className="font-bold text-io-blue">{humanizeToolName(log.name || '')}</div>
-                            {log.name === 'read_file' && log.args?.path ? (
-                              <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
-                                <span className="text-white/40">path:</span> {log.args.path}
-                              </div>
-                            ) : log.name === 'list_files' && log.args?.path ? (
-                              <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
-                                <span className="text-white/40">path:</span> {log.args.path}
-                              </div>
-                            ) : log.args && log.args.command ? (
-                              <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
-                                {scrubText(log.args.command)}
-                              </pre>
-                            ) : log.args && log.args.code ? (
-                              <div className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto font-mono text-[10px] border border-white/5">
-                                {log.args.language && <div className="text-white/40 mb-1">{log.args.language}</div>}
-                                <pre className="whitespace-pre-wrap">{scrubText(log.args.code)}</pre>
-                              </div>
-                            ) : log.args && Object.keys(log.args).length > 0 ? (
-                              <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
-                                {scrubText(JSON.stringify(log.args, null, 2))}
-                              </pre>
-                            ) : null}
-                          </div>
-                        ) : log.type === 'tool_result' ? (
-                          <div className="space-y-2">
-                            <div className={`font-bold ${log.result?.includes('"error"') || log.result?.startsWith('Error:') ? 'text-red-400' : 'text-io-green'}`}>
-                              Result: {humanizeToolName(log.name || 'output')}
-                            </div>
-                            {formatToolResult(log.name, log.result)}
-                          </div>
-                        ) : (
-                          renderMarkdown(scrubText(log.content || ''))
-                        )}
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
+              {renderGenerationLogEntries()}
 
               {isGenerating ? (
-                <div className="flex flex-col items-center gap-6 pt-4">
-                  <div className="flex gap-4 md:gap-6 font-mono text-xs md:text-sm opacity-50 w-full">
-                     <div className="w-16 shrink-0" />
-                     <div className="flex gap-3 w-28 shrink-0 items-start pt-0.5">
-                       <Loader2 className="w-4 h-4 text-io-blue shrink-0 animate-spin" />
-                       <span className="text-io-blue font-bold uppercase tracking-wider text-[10px] mt-0.5">Working</span>
-                     </div>
-                     <div className="flex-1">
-                       <span className="inline-flex gap-1">
-                         <span className="w-1.5 h-1.5 rounded-full bg-io-blue animate-bounce" />
-                         <span className="w-1.5 h-1.5 rounded-full bg-io-blue animate-bounce delay-75" />
-                         <span className="w-1.5 h-1.5 rounded-full bg-io-blue animate-bounce delay-150" />
-                       </span>
-                     </div>
-                  </div>
+                <div className="flex flex-col items-center gap-4 pt-4">
+                  <p className="text-io-blue/80 font-mono text-[10px] uppercase tracking-widest">Agent working…</p>
                   <button
+                    type="button"
                     onClick={handleStop}
-                    className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl font-bold text-xs tracking-widest uppercase transition-colors border border-red-500/20"
+                    className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl font-bold text-xs tracking-widest uppercase transition-colors border border-red-500/20 cursor-pointer"
                   >
                     Stop Agent
                   </button>
                 </div>
-              ) : generationComplete ? (
-                <div className="pt-8 pb-4 flex flex-col items-center gap-4">
-                  <div className="text-io-green font-bold tracking-widest uppercase text-sm mb-2 flex items-center gap-2">
-                    <CheckCircle2 className="w-5 h-5" /> Show Ready
-                  </div>
-                  <div className="flex gap-4">
-                    <button
-                      onClick={() => {
-                        setView('player');
-                        setGenerationComplete(false);
-                      }}
-                      className="px-8 py-3 bg-white text-black rounded-xl font-bold text-sm tracking-widest uppercase transition-colors hover:scale-105"
-                    >
-                      Listen Now
-                    </button>
-                    <button
-                      onClick={downloadLogs}
-                      className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-bold text-sm tracking-widest uppercase transition-colors"
-                    >
-                      Download Logs
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center w-full">
-                  {hasQuotaError && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="my-6 p-6 rounded-2xl bg-red-400/10 border border-red-500/20 backdrop-blur-md flex flex-col md:flex-row items-start gap-4 text-left max-w-2xl mx-auto w-full"
-                    >
-                      <div className="w-10 h-10 rounded-full bg-red-500/20 border border-red-500/30 flex items-center justify-center text-red-400 shrink-0 mx-auto md:mx-0">
-                        <ShieldAlert className="w-5 h-5 animate-pulse" />
-                      </div>
-                      <div className="space-y-3 flex-1 text-center md:text-left">
-                        <h4 className="font-bold text-red-200 text-xs md:text-sm tracking-wide uppercase">AI Studio Quota Limit Handled</h4>
-                        <p className="text-white/75 text-xs leading-relaxed font-sans">
-                          The current Gemini API key has run out of request quota for generating complete shows. Generating background soundscapes, distinct host voices via Lyria & Speech models, and painting covers demands a persistent billing plan or a personal Gemini API key.
-                        </p>
-                        <div className="text-[11px] text-white/60 bg-black/30 p-3 rounded-lg font-sans space-y-1">
-                          <div className="font-bold text-red-300">How to unlock unlimited generations:</div>
-                          <div>1. Go to the top-right <span className="font-semibold text-white/90">Settings &gt; Secrets</span> inside AI Studio.</div>
-                          <div>2. Locate <span className="font-mono text-io-blue font-bold">GEMINI_API_KEY</span>.</div>
-                          <div>3. Enter your own personal billed Google Gemini API Key.</div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                  <div className="pt-4 pb-4 flex justify-center gap-4 w-full">
-                    <button
-                      onClick={() => setView('home')}
-                      className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-bold text-sm tracking-widest uppercase transition-colors"
-                    >
-                      Go Back
-                    </button>
-                    <button
-                      onClick={downloadLogs}
-                      className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl font-bold text-sm tracking-widest uppercase transition-colors"
-                    >
-                      Download Logs
-                    </button>
-                  </div>
-                </div>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -2235,19 +2288,10 @@ export default function App() {
 
   if (sharedShowLoading) {
     return (
-      <div className="fixed inset-0 w-full h-full bg-black text-white flex flex-col items-center justify-center p-6 overflow-hidden">
-        <RainbowBackground />
-        <div className="space-y-6 text-center max-w-md relative z-10 w-full">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-white/5 border border-white/10 relative">
-            <div className="absolute inset-0 rounded-full border border-io-blue/40 animate-[spin_6s_linear_infinite]" />
-            <Loader2 className="w-10 h-10 text-io-blue animate-spin" />
-          </div>
-          <div className="space-y-2">
-            <h2 className="text-2xl font-bold tracking-tight text-white/90">Retrieving Shared Station...</h2>
-            <p className="text-white/40 text-sm font-medium leading-relaxed">Connecting to container and retrieving dynamic radio show data...</p>
-          </div>
-        </div>
-      </div>
+      <LoadingScreen
+        title="Retrieving Shared Station..."
+        subtitle="Connecting to container and retrieving dynamic radio show data..."
+      />
     );
   }
 
@@ -2698,22 +2742,16 @@ export default function App() {
 
                {sharingInProgress ? (
                 <div className="py-8 flex flex-col items-center justify-center space-y-5">
-                  <div className="relative">
-                    <div className="absolute inset-0 rounded-full border border-io-blue/30 animate-[spin_3s_linear_infinite]" />
-                    <Loader2 className="w-10 h-10 text-io-blue animate-spin" />
-                    <div className="absolute inset-x-0 h-full flex items-center justify-center text-[10px] font-mono font-bold text-white/95">
-                      {uploadProgress}%
-                    </div>
-                  </div>
+                  <AuraTorquePulsarSpinner size={80} />
                   <div className="text-center space-y-3 w-full max-w-xs mx-auto">
                     <div className="space-y-1">
                       <p className="text-sm font-bold text-white/95">{uploadStatus}</p>
                       <p className="text-xs text-white/45">Uploading audio stream and cover canvas directly to GCS...</p>
+                      <p className="text-[10px] font-mono font-bold text-io-blue">{uploadProgress}%</p>
                     </div>
-                    {/* Progress Bar Container */}
                     <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden border border-white/5">
-                      <div 
-                        className="h-full bg-io-blue transition-all duration-300 ease-out" 
+                      <div
+                        className="h-full bg-io-blue transition-all duration-300 ease-out"
                         style={{ width: `${uploadProgress}%` }}
                       />
                     </div>
