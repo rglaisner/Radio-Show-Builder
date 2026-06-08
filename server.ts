@@ -1,6 +1,11 @@
+import dotenv from "dotenv";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+
+// Load .env then .env.local (local overrides) so GEMINI_API_KEY is available to the Express server.
+dotenv.config({ path: path.join(process.cwd(), ".env") });
+dotenv.config({ path: path.join(process.cwd(), ".env.local"), override: true });
 import { createInteraction, streamInteraction, API_BASE_URL } from "./server/lib/agentClient.ts";
 import { extractJsonBlocks } from "./server/lib/jsonExtractor.ts";
 import { parseShowConfigRequest } from "./src/showConfig.ts";
@@ -14,6 +19,11 @@ import crypto from "crypto";
 import admin from "firebase-admin";
 
 const execAsync = util.promisify(exec);
+
+function getGeminiApiKey(): string | undefined {
+  const key = process.env.GEMINI_API_KEY?.trim();
+  return key || undefined;
+}
 
 function getGcsBucketName(): string | null {
   const bucket = process.env.GCS_BUCKET_NAME;
@@ -132,6 +142,11 @@ function cleanUpOldGenerations() {
 }
 
 async function startServer() {
+  if (!getGeminiApiKey()) {
+    console.warn(
+      "[server] GEMINI_API_KEY is not set. Show generation will fail until you add it to .env.local"
+    );
+  }
   const app = express();
   const PORT = 3000;
 
@@ -645,7 +660,18 @@ async function startServer() {
       console.log(
         `[generate-show] Request received for topic: "${showConfig.topic}", duration: "${showConfig.durationMinutes}", mood: "${showConfig.mood}", preset: "${showConfig.presetId ?? "none"}", generationId: "${generationId}"`
       );
-      console.log(`[generate-show] GEMINI_API_KEY presence verified: ${!!process.env.GEMINI_API_KEY}`);
+      const geminiApiKey = getGeminiApiKey();
+      console.log(`[generate-show] GEMINI_API_KEY presence verified: ${!!geminiApiKey}`);
+      if (!geminiApiKey) {
+        sendEvent({
+          type: "error",
+          message:
+            "GEMINI_API_KEY is not configured. Add it to .env.local in the project root (see README). Get a key at https://aistudio.google.com/apikey",
+        });
+        res.end();
+        return;
+      }
+
       sendEvent({ type: "info", message: "Provisioning environment..." });
 
       console.log(`[generate-show] Loading agent files from filesystem path: ${path.join(process.cwd(), "agent")}`);
