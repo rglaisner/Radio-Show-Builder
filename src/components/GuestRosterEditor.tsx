@@ -28,6 +28,10 @@ const selectClass =
   'w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none';
 const labelClass = 'text-[10px] font-bold uppercase tracking-wider text-white/40';
 
+function guestFieldId(index: number, field: string): string {
+  return `guest-${index}-${field}`;
+}
+
 export interface GuestRosterEditorProps {
   style: ShowStyle;
   guests: Partial<ShowConfig['guests']>;
@@ -178,9 +182,9 @@ export function GuestRosterEditor({
       {showRoster && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <label className={labelClass}>
+            <span className={labelClass}>
               {mode === 'fixed' ? 'Guest roster' : 'Guest archetypes'}
-            </label>
+            </span>
             <button
               type="button"
               onClick={addGuest}
@@ -242,10 +246,12 @@ export function GuestRosterEditor({
                 {isExpanded && (
                   <div className="px-3 pb-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-white/5 pt-3">
                     <div className="space-y-2">
-                      <label className={labelClass}>
+                      <label htmlFor={guestFieldId(index, 'name')} className={labelClass}>
                         Name{mode === 'fixed' ? ' *' : ''}
                       </label>
                       <input
+                        id={guestFieldId(index, 'name')}
+                        name={guestFieldId(index, 'name')}
                         type="text"
                         autoComplete="off"
                         value={guest.name ?? ''}
@@ -255,8 +261,10 @@ export function GuestRosterEditor({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Voice</label>
+                      <label htmlFor={guestFieldId(index, 'voice')} className={labelClass}>Voice</label>
                       <select
+                        id={guestFieldId(index, 'voice')}
+                        name={guestFieldId(index, 'voice')}
                         value={guest.voice ?? ''}
                         onChange={(e) =>
                           updateGuest(index, {
@@ -276,8 +284,10 @@ export function GuestRosterEditor({
                       </select>
                     </div>
                     <div className="space-y-2 md:col-span-2">
-                      <label className={labelClass}>Persona</label>
+                      <label htmlFor={guestFieldId(index, 'persona')} className={labelClass}>Persona</label>
                       <textarea
+                        id={guestFieldId(index, 'persona')}
+                        name={guestFieldId(index, 'persona')}
                         rows={2}
                         autoComplete="off"
                         value={guest.persona ?? ''}
@@ -287,8 +297,10 @@ export function GuestRosterEditor({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Delivery</label>
+                      <label htmlFor={guestFieldId(index, 'delivery')} className={labelClass}>Delivery</label>
                       <select
+                        id={guestFieldId(index, 'delivery')}
+                        name={guestFieldId(index, 'delivery')}
                         value={guest.delivery ?? ''}
                         onChange={(e) =>
                           updateGuest(index, {
@@ -308,8 +320,10 @@ export function GuestRosterEditor({
                       </select>
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Accent</label>
+                      <label htmlFor={guestFieldId(index, 'accent')} className={labelClass}>Accent</label>
                       <input
+                        id={guestFieldId(index, 'accent')}
+                        name={guestFieldId(index, 'accent')}
                         type="text"
                         autoComplete="off"
                         value={guest.accent ?? ''}
@@ -319,8 +333,10 @@ export function GuestRosterEditor({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Location</label>
+                      <label htmlFor={guestFieldId(index, 'location')} className={labelClass}>Location</label>
                       <input
+                        id={guestFieldId(index, 'location')}
+                        name={guestFieldId(index, 'location')}
                         type="text"
                         autoComplete="off"
                         value={guest.location ?? ''}
@@ -330,8 +346,10 @@ export function GuestRosterEditor({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Gender</label>
+                      <label htmlFor={guestFieldId(index, 'gender')} className={labelClass}>Gender</label>
                       <select
+                        id={guestFieldId(index, 'gender')}
+                        name={guestFieldId(index, 'gender')}
                         value={guest.gender ?? 'unspecified'}
                         onChange={(e) =>
                           updateGuest(index, { gender: e.target.value as GuestGender })
@@ -346,8 +364,10 @@ export function GuestRosterEditor({
                       </select>
                     </div>
                     <div className="space-y-2">
-                      <label className={labelClass}>Audio treatment</label>
+                      <label htmlFor={guestFieldId(index, 'audio-treatment')} className={labelClass}>Audio treatment</label>
                       <select
+                        id={guestFieldId(index, 'audio-treatment')}
+                        name={guestFieldId(index, 'audio-treatment')}
                         value={guest.audioTreatment ?? 'phone'}
                         onChange={(e) =>
                           updateGuest(index, { audioTreatment: e.target.value as AudioTreatment })

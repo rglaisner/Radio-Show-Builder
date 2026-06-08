@@ -2039,7 +2039,7 @@ export default function App() {
                           )}
 
                           <div className="space-y-2">
-                            <label className="text-[10px] font-bold uppercase tracking-wider text-white/40">Radio features</label>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-white/40">Radio features</span>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                               {RADIO_FEATURE_KEYS.map((key) => (
                                 <label key={key} htmlFor={featureFieldId(key)} className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
