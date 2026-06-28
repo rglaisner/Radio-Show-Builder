@@ -17,6 +17,11 @@ const FORM_IDS = {
   playbackVolume: 'playback-volume',
 } as const;
 
+async function dismissQuickStart(page: import('@playwright/test').Page) {
+  await page.getByRole('button', { name: 'Skip' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+}
+
 test.describe('Show Generator', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
@@ -32,18 +37,27 @@ test.describe('Show Generator', () => {
     await expect(page.locator(`#${FORM_IDS.topic}`)).toBeVisible();
   });
 
-  test('should show quick start guide on first visit', async ({ page }) => {
-    await expect(page.getByText('Quick start — how this works')).toBeVisible();
+  test('should show quick start guide modal on first visit', async ({ page }) => {
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText('Quick start — how this works')).toBeVisible();
+    await expect(dialog.getByText('Preview first')).toBeVisible();
+  });
+
+  test('should dismiss quick start guide with Skip', async ({ page }) => {
+    await dismissQuickStart(page);
+    await expect(page.getByRole('form', { name: 'Generate radio show' })).toBeVisible();
+  });
+
+  test('should reopen quick start guide via How it works', async ({ page }) => {
+    await dismissQuickStart(page);
+    await page.getByRole('button', { name: 'How it works' }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByText('Preview first')).toBeVisible();
   });
 
-  test('should dismiss quick start guide', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
-    await expect(page.getByText('Quick start — how this works')).not.toBeVisible();
-  });
-
   test('should have id and name on primary form fields', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
 
     const check = async (selector: string) => {
       const field = page.locator(`#${selector}`);
@@ -57,7 +71,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should toggle advanced panel and expose labeled fields', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
     await page.getByRole('button', { name: 'Advanced' }).click();
 
     const advancedFields = [
@@ -88,7 +102,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should select a format starter and update advanced style', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
 
     const techDebate = page.getByRole('button', { name: /Tech Debate/i }).first();
     await techDebate.click();
@@ -105,7 +119,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should select an example starter and populate topic and host profile', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
 
     await page.getByRole('button', { name: /GitHub Roundtable/i }).click();
 
@@ -122,7 +136,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should sync mood selection to show style in advanced panel', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
 
     await page.locator(`#${FORM_IDS.mood}`).selectOption('Hype & Energetic');
     await page.getByRole('button', { name: 'Advanced' }).click();
@@ -132,7 +146,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should allow custom show style in advanced panel', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
     await page.getByRole('button', { name: 'Advanced' }).click();
 
     await page.locator(`#${FORM_IDS.showStyle}`).selectOption('custom');
@@ -143,7 +157,7 @@ test.describe('Show Generator', () => {
   });
 
   test('should open library show and expose player controls with id and name', async ({ page }) => {
-    await page.getByRole('button', { name: 'Dismiss quick start guide' }).click();
+    await dismissQuickStart(page);
     await page.getByRole('heading', { name: 'Radio Show Library' }).scrollIntoViewIfNeeded();
 
     await page
