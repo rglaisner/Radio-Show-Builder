@@ -1,11 +1,11 @@
 ---
 name: audio-mixing
-description: Mix speech audio and background music into a polished radio show file.
+description: Mix timeline-based speech, overlaps, ambient beds, SFX, and music into a polished radio show file.
 ---
 
 # Audio Mixing
 
-Combine the TTS speech audio and Lyria background music into a single, polished radio show file.
+Combine TTS speech clips from `audio_timeline.json` into a single, polished radio show file with realistic overlaps and ducking.
 
 ## Embedded Script
 
@@ -18,42 +18,30 @@ python3 skills/audio-mixing/scripts/mix_audio.py --workspace ./workspace
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--workspace` | `workspace` | Root workspace directory |
+| `--config` | `show_config.json` | Show configuration path |
 
 ### What it does
 
-1. Loads speech from `{workspace}/audio/speech/speech.wav`.
-2. Adds 3 seconds of silence padding to the end of the speech to prevent it from being faded out.
-3. Loads background music from `{workspace}/audio/music/background.mp3` (if exists).
-4. Loops music to match speech duration, lowers volume to -18dB.
-5. Overlays speech on music with a 1-second music intro.
-6. Adds fade-in/fade-out.
-7. Exports as MP3.
+1. Loads `data/audio_timeline.json` (falls back to legacy concat if missing).
+2. Resolves overlap positions from measured clip durations.
+3. Overlays speech, interjections, backchannels with ducking on interrupted speakers.
+4. Loops ambient beds (room tone, phone hiss) when `realism.ambientBeds` is enabled.
+5. Places SFX at timeline positions (including `[hold]`).
+6. Mixes background music with sidechain ducking under speech.
+7. Exports MP3 and writes `data/timeline_manifest.json`.
 
 ### Dependencies
 
 - `pydub`
 - `ffmpeg` (system)
 
-## Mixing Guidelines
-
-| Element | Level | Notes |
-|---------|-------|-------|
-| Speech | 0 dB | Untouched, full volume |
-| Background music | -18 dB | Barely audible — subtle bed under speech |
-
-### Transitions
-
-- Music fade-in: 3 seconds
-- Music fade-out: 5 seconds
-- Overall fade-in: 500ms
-- Overall fade-out: 2 seconds
-
 ## Output
 
 | File | Path | Format |
 |------|------|--------|
 | MP3 (distribution) | `{workspace}/audio/final/ai_radio.mp3` | MP3, 192kbps |
+| Timeline manifest | `{workspace}/data/timeline_manifest.json` | JSON |
 
 ## Fallback
 
-If no background music exists, produces speech-only output with just fade-in/fade-out applied.
+If no timeline exists, produces legacy speech-concat mix with intro/outro music only.

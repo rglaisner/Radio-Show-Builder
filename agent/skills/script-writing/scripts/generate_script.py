@@ -26,7 +26,9 @@ STYLE_PROMPTS = {
 1. Cold Open (10 sec): Host teases the most controversial take.
 2. Intro (15 sec): Host welcomes listeners, sets up the debate format.
 3. Debate Segments (2.5 min): Host introduces a topic, takes calls from two sides. Callers argue their positions, host moderates.
-4. Closing (15 sec): Host summarizes both sides, thanks callers.""",
+4. Closing (15 sec): Host summarizes both sides, thanks callers.
+
+**Realistic dialogue (when realism enabled):** Include 1-3 natural barge-ins using `[interrupts SpeakerName]` when callers react to dismissive language. Host may use `[under]` backchannels while guests speak.""",
     "roundtable": """
 **Style: ROUNDTABLE**
 
@@ -36,7 +38,9 @@ STYLE_PROMPTS = {
 1. Cold Open (10 sec): Host previews the topic.
 2. Intro (15 sec): Host welcomes the panel and introduces each caller.
 3. Discussion (2.5 min): Open conversation — callers riff on each other's points, host guides the flow.
-4. Closing (15 sec): Host ties the threads together.""",
+4. Closing (15 sec): Host ties the threads together.
+
+**Realistic dialogue:** Callers may briefly overlap using `[interrupts SpeakerName]` or collaborative `[under]` reactions. Keep overlaps natural, not constant.""",
     "interview": """
 **Style: INTERVIEW**
 
@@ -46,7 +50,9 @@ STYLE_PROMPTS = {
 1. Cold Open (10 sec): Host teases what the guest will reveal.
 2. Intro (15 sec): Host introduces the guest(s) and their background.
 3. Interview (2.5 min): Host asks questions, guest(s) answer in depth. Follow-up questions encouraged.
-4. Closing (15 sec): Host thanks the guest(s) and summarizes key takeaways.""",
+4. Closing (15 sec): Host thanks the guest(s) and summarizes key takeaways.
+
+**Realistic dialogue:** Host may use `[under]` backchannels ("mm-hmm", "right") while guests speak. No guest-on-guest interruptions.""",
     "explainer": """
 **Style: EXPLAINER**
 
@@ -56,7 +62,9 @@ STYLE_PROMPTS = {
 1. Cold Open (10 sec): Host poses a question the audience might be wondering.
 2. Intro (15 sec): Host sets up the topic and says we have people who can break it down.
 3. Explainer Segments (2.5 min): Each caller explains their piece. Host asks clarifying questions on behalf of the audience.
-4. Closing (15 sec): Host recaps the key points.""",
+4. Closing (15 sec): Host recaps the key points.
+
+**Realistic dialogue:** Minimal overlap; occasional `[reaction]` or `[pause 1.5s]` for thinking beats only.""",
 }
 
 STYLE_PROMPTS["default"] = STYLE_PROMPTS["debate"]
@@ -95,6 +103,11 @@ Write a ~{duration}-minute radio script based on the research provided. The show
 - Example: `Caller1: [Male] [Accent: Irish] [hesitantly] I think...`
 - You MUST include **audio tags** in square brackets to indicate delivery.
 - Use tags like `[sighs]`, `[frustratedly]`, `[calmly]`, `[whispers]`, `[indignantly]`.
+- **Realistic overlap tags** (use sparingly, match show style):
+  - `[interrupts SpeakerName]` — barge-in over that speaker's current line (debate/roundtable only)
+  - `[under]` or `[reaction]` — short backchannel ("mm-hmm", "right") under the previous speaker
+  - `[pause 1.2s]` — variable pause before this line (optional)
+  - Example: `Guest2: [interrupts Guest1] [indignantly] Oh obviously you can't align with the rest of us on that.`
 - **CRITICAL**: Callers are amateurs — imperfect, natural speech with fillers ("uh", "like", "you know").
 - **Tone**: Callers are smart, tech-savvy individuals, not professional broadcasters.
 - **Host Introduction**: Host {host_name} MUST introduce each new caller by name and location before their first line.
@@ -181,6 +194,15 @@ def main():
     if args.revision:
         system_prompt += (
             f"\n\n**REVISION REQUIRED** (fix these issues from script review):\n{args.revision}"
+        )
+
+    realism = config.get("realism", {})
+    if realism.get("enabled", True):
+        intensity = realism.get("intensity", "moderate")
+        system_prompt += (
+            f"\n\n**REALISM ({intensity})**: Write dialogue that sounds like live radio — "
+            "natural overlaps where appropriate for the show style. Use `[interrupts Name]`, "
+            "`[under]`, `[reaction]`, and `[pause Xs]` tags as documented."
         )
 
     print("=== AI Talk Radio: Script Generation ===\n")

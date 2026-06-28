@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import random
 import struct
 import sys
 import wave
@@ -63,6 +64,41 @@ def write_stinger_wav(path, duration_sec=2.0):
         wf.writeframes(struct.pack(f"<{len(samples)}h", *samples))
 
 
+def write_noise_wav(path, duration_sec=5.0, volume=0.04, lowpass_bias=0.3):
+    """Generate filtered noise for room tone / phone hiss."""
+    samples = []
+    total_samples = int(SAMPLE_RATE * duration_sec)
+    prev = 0.0
+    for i in range(total_samples):
+        raw = random.uniform(-1, 1)
+        smoothed = prev * lowpass_bias + raw * (1 - lowpass_bias)
+        prev = smoothed
+        samples.append(int(max(-32767, min(32767, smoothed * volume * 32767))))
+
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def write_murmur_wav(path, duration_sec=6.0, volume=0.06):
+    """Generate subtle crowd murmur texture."""
+    samples = []
+    total_samples = int(SAMPLE_RATE * duration_sec)
+    for i in range(total_samples):
+        t = i / SAMPLE_RATE
+        mod = 0.5 + 0.5 * math.sin(2 * math.pi * 0.4 * t)
+        sample = random.uniform(-1, 1) * mod * volume
+        samples.append(int(max(-32767, min(32767, sample * 32767))))
+
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate radio SFX")
     parser.add_argument("--workspace", default="workspace")
@@ -71,6 +107,7 @@ def main():
 
     config = load_show_config(args.workspace, args.config)
     features = config.get("features", {})
+    realism = config.get("realism", {})
 
     sfx_dir = os.path.join(args.workspace, "audio", "sfx")
     os.makedirs(sfx_dir, exist_ok=True)
@@ -95,6 +132,19 @@ def main():
         write_tone_wav(path, [220, 277], duration_sec=3.0, volume=0.15)
         generated.append("hold_tone.wav")
         print("  ✓ hold_tone.wav")
+
+    if realism.get("ambientBeds", True):
+        ambient_files = [
+            ("studio_room_tone.wav", lambda p: write_noise_wav(p, duration_sec=8.0, volume=0.025, lowpass_bias=0.85)),
+            ("phone_hiss.wav", lambda p: write_noise_wav(p, duration_sec=8.0, volume=0.035, lowpass_bias=0.5)),
+            ("field_ambient.wav", lambda p: write_noise_wav(p, duration_sec=8.0, volume=0.04, lowpass_bias=0.65)),
+            ("crowd_murmur.wav", lambda p: write_murmur_wav(p)),
+        ]
+        for filename, generator in ambient_files:
+            path = os.path.join(sfx_dir, filename)
+            generator(path)
+            generated.append(filename)
+            print(f"  ✓ {filename}")
 
     manifest_path = os.path.join(sfx_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:

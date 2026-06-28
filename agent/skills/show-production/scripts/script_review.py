@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -12,6 +13,15 @@ from google import genai
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 from load_config import get_host_name, load_show_config  # noqa: E402
+
+INTERRUPT_RE = re.compile(r"\[interrupts\s+([^\]]+)\]", re.IGNORECASE)
+
+
+def count_overlap_tags(script_text):
+    interrupts = len(INTERRUPT_RE.findall(script_text))
+    under = len(re.findall(r"\[under\]", script_text, re.IGNORECASE))
+    reactions = len(re.findall(r"\[reaction\]", script_text, re.IGNORECASE))
+    return interrupts, under + reactions
 
 REVIEW_PROMPT = """You are a radio production director reviewing a script before TTS recording.
 
@@ -32,6 +42,8 @@ Check:
 6. Required segments present (intro, main content, closing)
 7. Content safety (no politics, profanity, etc.)
 8. No fabricated facts beyond research
+9. Overlap tags (`[interrupts]`, `[under]`, `[reaction]`) are plausible for personas — shy callers should not have many sharp interjections
+10. `[interrupts SpeakerName]` references a speaker who spoke recently
 
 Return ONLY valid JSON."""
 
@@ -103,6 +115,18 @@ def main():
         pct = count / total_lines * 100 if total_lines else 0
         if style != "interview" and pct > 45:
             deterministic_issues.append(f"Speaker '{speaker}' has {pct:.0f}% of lines (max 45%)")
+
+    realism = config.get("realism", {})
+    if realism.get("enabled", True):
+        interrupts, backchannels = count_overlap_tags(script)
+        intensity = realism.get("intensity", "moderate")
+        max_interrupts = {"subtle": 2, "moderate": 4, "lively": 8}.get(intensity, 4)
+        if interrupts > max_interrupts:
+            deterministic_issues.append(
+                f"Too many [interrupts] tags ({interrupts}) for {intensity} realism (max {max_interrupts})"
+            )
+        if style == "interview" and interrupts > 0:
+            deterministic_issues.append("Interview style should not use guest [interrupts] tags")
 
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 

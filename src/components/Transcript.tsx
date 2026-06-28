@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { TranscriptLine } from '../types';
 
 interface TranscriptProps {
@@ -12,7 +12,10 @@ export function Transcript({ transcript, currentTime, onSeek }: TranscriptProps)
   const containerRef = useRef<HTMLDivElement>(null);
   const activeLineRef = useRef<HTMLDivElement>(null);
 
-  const activeIndex = transcript.findIndex(line => currentTime >= line.start && currentTime < line.end);
+  const activeIndices = transcript
+    .map((line, index) => (currentTime >= line.start && currentTime < line.end ? index : -1))
+    .filter((index) => index !== -1);
+  const activeIndex = activeIndices[0] ?? -1;
   const lastIndexRef = useRef<number>(-1);
 
   useEffect(() => {
@@ -28,8 +31,6 @@ export function Transcript({ transcript, currentTime, onSeek }: TranscriptProps)
         const prevElement = document.getElementById(`transcript-line-${activeIndex - 1}`);
         
         if (prevElement) {
-          // Align the previous element to the top, accounting for the 80px (pt-20) padding
-          // This perfectly positions the active element as "second from the top"
           targetScrollTop = prevElement.offsetTop - 80;
         }
         
@@ -48,23 +49,26 @@ export function Transcript({ transcript, currentTime, onSeek }: TranscriptProps)
     >
       <div className="flex flex-col gap-10">
         {transcript.map((line, index) => {
-          const isActive = currentTime >= line.start && currentTime < line.end;
+          const isActive = activeIndices.includes(index);
+          const isOverlap = Boolean(line.overlapGroup) && activeIndices.length > 1;
           
           return (
             <motion.div
               key={`${line.start}-${index}`}
               id={`transcript-line-${index}`}
-              ref={isActive ? activeLineRef : null}
+              ref={isActive && activeIndex === index ? activeLineRef : null}
               initial={{ opacity: 0.1 }}
               animate={{ 
                 opacity: 1,
               }}
               onClick={() => onSeek(line.start)}
-              className="relative cursor-pointer transition-all duration-500 group pl-12"
+              className={`relative cursor-pointer transition-all duration-500 group pl-12 ${
+                isOverlap && isActive ? 'ring-1 ring-[#4285f4]/30 rounded-lg py-1' : ''
+              }`}
             >
               {isActive && (
                 <motion.div 
-                  layoutId="activeBar"
+                  layoutId={isOverlap ? undefined : "activeBar"}
                   className="absolute left-0 top-1 bottom-1 w-1 bg-gradient-to-b from-[#4285f4] to-[#f4b400] rounded-full shadow-[0_0_15px_rgba(66,133,244,0.4)]"
                 />
               )}
@@ -77,6 +81,9 @@ export function Transcript({ transcript, currentTime, onSeek }: TranscriptProps)
                   {line.speaker && (
                     <span className={`text-[10px] uppercase tracking-[0.25em] font-extrabold mt-0.5 ${isActive ? 'text-io-green' : 'text-neutral-500'}`}>
                       {line.speaker}
+                      {isOverlap && isActive && (
+                        <span className="ml-2 text-[#4285f4] normal-case tracking-normal font-semibold">(overlapping)</span>
+                      )}
                     </span>
                   )}
                   <p className={`leading-snug transition-all duration-500 text-lg font-medium tracking-tight ${

@@ -15,6 +15,7 @@ When `workspace/data/show_config.json` is present (injected by the server), **yo
 - Show structure (style, enabled segments)
 - Radio features (station ID, phone SFX, stingers, etc.)
 - Music mood and duration
+- Realism settings (overlap intensity, ambient beds, guest barge-ins)
 
 If `show_config.json` is missing, fall back to defaults: host Paul, debate style, tech music, 3-minute show.
 
@@ -48,13 +49,14 @@ Upon execution, you should:
 1. **Research** — gather source material based on the user's prompt.
 2. **Write Script** — `generate_script.py --config ./workspace/data/show_config.json` (host/guests/segments from config).
 3. **Script Review** — `script_review.py --config ...` (Production Director; auto-revises once if needed).
-4. **Generate Speech** — `generate_tts.py --config ...` (per-speaker voices and audio treatment from config).
-5. **Generate Music** — `generate_music.py --mood <from config>` (skip if music disabled in config).
-6. **Generate SFX** — `generate_sfx.py --config ...` (phone connect, stingers if enabled).
-7. **Mix Audio** — `mix_audio.py --config ...` (gaps, ducking, intro/outro from config).
-8. **Quality Check** — `quality_check.py --config ...` (duration, loudness normalization).
-9. **Generate Metadata** — `generate_metadata.py --config ...` (includes generation_config, speakers, quality_report).
-10. **Generate Cover Image** — `generate_image.py` based on show_notes.json.
+4. **Audio Direction** — `direct_audio.py --config ...` (builds `audio_timeline.json` with overlaps, pauses, SFX placement).
+5. **Generate Speech** — `generate_tts.py --config ...` (per-event TTS clips from timeline).
+6. **Generate Music** — `generate_music.py --mood <from config>` (skip if music disabled in config).
+7. **Generate SFX** — `generate_sfx.py --config ...` (phone connect, stingers, ambient beds).
+8. **Mix Audio** — `mix_audio.py --config ...` (timeline mixer with ducking, intro/outro).
+9. **Quality Check** — `quality_check.py --config ...` (duration, loudness, overlap budget).
+10. **Generate Metadata** — `generate_metadata.py --config ...` (timeline-accurate timecodes).
+11. **Generate Cover Image** — `generate_image.py` based on show_notes.json.
 
 > [!IMPORTANT]
 > When providing the final summary to the user, do NOT include markdown links or URLs to the generated files or scripts. Just use the plain file name.
@@ -66,13 +68,14 @@ User prompt + show_config.json
   ├── 1. RESEARCH → {workspace}/data/research/*.md
   ├── 2. generate_script.py --config ./workspace/data/show_config.json → script.md
   ├── 3. script_review.py --config ... → script_review.json (may trigger revision)
-  ├── 4. generate_tts.py --config ... → audio/speech/speech.wav
-  ├── 5. generate_music.py --mood <config> → audio/music/background.mp3
-  ├── 6. generate_sfx.py --config ... → audio/sfx/*.wav
-  ├── 7. mix_audio.py --config ... → audio/final/ai_radio.mp3
-  ├── 8. quality_check.py --config ... → data/quality_report.json
-  ├── 9. generate_metadata.py --config ... → data/show_notes.json
-  └── 10. generate_image.py → images/cover.png
+  ├── 4. direct_audio.py --config ... → data/audio_timeline.json
+  ├── 5. generate_tts.py --config ... → audio/speech/segments/*.wav
+  ├── 6. generate_music.py --mood <config> → audio/music/background.mp3
+  ├── 7. generate_sfx.py --config ... → audio/sfx/*.wav
+  ├── 8. mix_audio.py --config ... → audio/final/ai_radio.mp3 + timeline_manifest.json
+  ├── 9. quality_check.py --config ... → data/quality_report.json
+  ├── 10. generate_metadata.py --config ... → data/show_notes.json
+  └── 11. generate_image.py → images/cover.png
 ```
 
 ### Show Presets (when no config provided)
@@ -113,7 +116,7 @@ All Gemini API calls use the **Interactions API** (`client.interactions.create()
 |-------|--------|---------|
 | `research` | `fetch_hn.py`, `fetch_github.py`, `fetch_url.py` | Gather content |
 | `script-writing` | `generate_script.py` | LLM writes script (`--config`) |
-| `show-production` | `script_review.py`, `generate_sfx.py`, `quality_check.py` | Production Director |
+| `show-production` | `script_review.py`, `direct_audio.py`, `generate_sfx.py`, `quality_check.py` | Production Director + audio timeline |
 | `tts-generation` | `generate_tts.py` | TTS + telephone filter (`--config`) |
 | `music-generation` | `generate_music.py` | Lyria ambient music |
 | `audio-mixing` | `mix_audio.py` | Mix speech + music + SFX (`--config`) |
@@ -127,13 +130,14 @@ Run strictly in order:
 1. `research` → `data/research/*.md`
 2. `script-writing --config` → `data/script.md`
 3. `show-production/script_review --config` → `data/script_review.json`
-4. `tts-generation --config` → `audio/speech/speech.wav`
-5. `music-generation` → `audio/music/background.mp3` (skip if disabled)
-6. `show-production/generate_sfx --config` → `audio/sfx/`
-7. `audio-mixing --config` → `audio/final/ai_radio.mp3`
-8. `show-production/quality_check --config` → `data/quality_report.json`
-9. `metadata-generation --config` → `data/show_notes.json`
-10. `cover-image-generation` → `images/cover.png`
+4. `show-production/direct_audio --config` → `data/audio_timeline.json`
+5. `tts-generation --config` → `audio/speech/segments/*.wav`
+6. `music-generation` → `audio/music/background.mp3` (skip if disabled)
+7. `show-production/generate_sfx --config` → `audio/sfx/`
+8. `audio-mixing --config` → `audio/final/ai_radio.mp3` + `data/timeline_manifest.json`
+9. `show-production/quality_check --config` → `data/quality_report.json`
+10. `metadata-generation --config` → `data/show_notes.json`
+11. `cover-image-generation` → `images/cover.png`
 
 ## Production Director — Non-Negotiable Rules
 
@@ -173,6 +177,9 @@ Technology, software, programming, open source, AI/ML, science, engineering, dev
 | Research data | `./workspace/data/research/` |
 | Radio script | `./workspace/data/script.md` |
 | Script review | `./workspace/data/script_review.json` |
+| Audio timeline | `./workspace/data/audio_timeline.json` |
+| Timeline manifest | `./workspace/data/timeline_manifest.json` |
+| Guided speaker map | `./workspace/data/guided_speaker_map.json` |
 | Script markers | `./workspace/data/script_markers.json` |
 | Speech segments | `./workspace/audio/speech/segments/` |
 | Speech (combined) | `./workspace/audio/speech/speech.wav` |

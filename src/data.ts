@@ -8,14 +8,19 @@ function parseTimecode(time: string): number {
 export function transformShow(raw: RawRadioShow): RadioShow {
   const transcript = raw.timecoded_transcript.map((line, i, arr) => {
     const start = parseTimecode(line.timecode);
-    const nextLine = arr[i + 1];
-    const end = nextLine ? parseTimecode(nextLine.timecode) : parseTimecode(raw.show_duration);
+    const end = line.endTimecode
+      ? parseTimecode(line.endTimecode)
+      : (() => {
+          const nextLine = arr[i + 1];
+          return nextLine ? parseTimecode(nextLine.timecode) : parseTimecode(raw.show_duration);
+        })();
     
     return {
       start,
       end,
       speaker: line.speaker,
       text: line.text,
+      overlapGroup: line.overlapGroup,
     };
   });
 

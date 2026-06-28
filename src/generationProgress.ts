@@ -1,4 +1,4 @@
-export const PIPELINE_STEP_TOTAL = 11;
+export const PIPELINE_STEP_TOTAL = 12;
 
 export interface GenerationProgress {
   stepIndex: number;
@@ -19,13 +19,14 @@ const PIPELINE_STEPS: Array<{ index: number; label: string; matchers: string[] }
   { index: 1, label: 'Researching topic', matchers: ['fetch_hn.py', 'fetch_github.py', 'fetch_url.py'] },
   { index: 2, label: 'Writing script', matchers: ['generate_script.py'] },
   { index: 3, label: 'Reviewing script', matchers: ['script_review.py'] },
-  { index: 4, label: 'Generating speech', matchers: ['generate_tts.py'] },
-  { index: 5, label: 'Generating music', matchers: ['generate_music.py'] },
-  { index: 6, label: 'Generating sound effects', matchers: ['generate_sfx.py'] },
-  { index: 7, label: 'Mixing audio', matchers: ['mix_audio.py'] },
-  { index: 8, label: 'Quality check', matchers: ['quality_check.py'] },
-  { index: 9, label: 'Generating metadata', matchers: ['generate_metadata.py'] },
-  { index: 10, label: 'Generating cover image', matchers: ['generate_image.py'] },
+  { index: 4, label: 'Planning audio timeline', matchers: ['direct_audio.py'] },
+  { index: 5, label: 'Generating speech', matchers: ['generate_tts.py'] },
+  { index: 6, label: 'Generating music', matchers: ['generate_music.py'] },
+  { index: 7, label: 'Generating sound effects', matchers: ['generate_sfx.py'] },
+  { index: 8, label: 'Mixing audio', matchers: ['mix_audio.py'] },
+  { index: 9, label: 'Quality check', matchers: ['quality_check.py'] },
+  { index: 10, label: 'Generating metadata', matchers: ['generate_metadata.py'] },
+  { index: 11, label: 'Generating cover image', matchers: ['generate_image.py'] },
 ];
 
 const READ_FILE_HINTS: Array<{ pattern: string; subLabel: string }> = [
@@ -169,7 +170,7 @@ export function progressFromToolResult(
   result: string,
   current: GenerationProgress
 ): GenerationProgress {
-  if (current.stepIndex !== 4) return current;
+  if (current.stepIndex !== 5) return current;
   if (name !== 'bash' && name !== 'code_execution_call') return current;
 
   const text = extractToolResultText(name, result);
