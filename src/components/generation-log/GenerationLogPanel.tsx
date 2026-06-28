@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { AnimatePresence } from 'motion/react';
 import { groupToolPairs, isVerboseItem, matchesFilter } from './groupToolPairs';
@@ -122,11 +122,9 @@ export function GenerationLogPanel({
         >
           <AnimatePresence initial={false}>
             {visibleItems.map((item) => (
-              <GenerationLogEntryRow
-                key={item.kind === 'action_group' ? item.id : item.entry.id}
-                item={item}
-                hideVerbose={hideVerbose}
-              />
+              <Fragment key={item.kind === 'action_group' ? item.id : item.entry.id}>
+                <GenerationLogEntryRow item={item} hideVerbose={hideVerbose} />
+              </Fragment>
             ))}
           </AnimatePresence>
           {footer}

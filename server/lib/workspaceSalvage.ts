@@ -84,13 +84,13 @@ export function assembleShowFromWorkspace(
   const canResume = lastCompletedStep > 0 && lastCompletedStep < 11;
 
   const show: SalvagedShow = {
-    ...(payload ?? {
+    ...((payload ?? {
       show_title: showConfig.topic,
       show_duration: `${String(showConfig.durationMinutes).padStart(2, "0")}:00`,
       two_sentence_summary: `Partial show about ${showConfig.topic}.`,
       date_of_generation: new Date().toISOString().slice(0, 10),
       timecoded_transcript: [],
-    }),
+    }) as RawRadioShow),
     completeness,
     lastCompletedStep,
     canResume,

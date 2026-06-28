@@ -672,7 +672,7 @@ async function startServer() {
 
       const apiProbe = await probeGeminiApiAccess(geminiApiKey);
       if (!apiProbe.ok) {
-        sendEvent({ type: "error", message: apiProbe.message });
+        sendEvent({ type: "error", message: apiProbe.ok === false ? apiProbe.message : "Gemini API probe failed" });
         res.end();
         return;
       }
@@ -883,7 +883,7 @@ async function startServer() {
 
     const apiProbe = await probeGeminiApiAccess(geminiApiKey);
     if (!apiProbe.ok) {
-      return res.status(503).json({ error: apiProbe.message });
+      return res.status(503).json({ error: apiProbe.ok === false ? apiProbe.message : "Gemini API probe failed" });
     }
 
     res.writeHead(200, {
@@ -1157,8 +1157,12 @@ async function startServer() {
   const startListening = (port: number) => {
     const server = app.listen(port, "0.0.0.0", () => {
       console.log(`Server running on http://localhost:${port}`);
-    }).on('error', (err: any) => {
+    }).on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
+        if (process.env.NODE_ENV === 'production') {
+          console.error(`Port ${port} is in use; refusing to bind to a different port in production.`);
+          process.exit(1);
+        }
         console.log(`Port ${port} is in use, trying ${port + 1}...`);
         startListening(port + 1);
       } else {

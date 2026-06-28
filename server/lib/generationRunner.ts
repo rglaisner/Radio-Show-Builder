@@ -408,7 +408,7 @@ export async function runGeneration(
         }
         policyHandler.handleToolResult(event.name, event.result);
         if (policyHandler.isPaused()) {
-          sendEvent(event as Record<string, unknown>);
+          sendEvent(event as unknown as Record<string, unknown>);
           break;
         }
       }
@@ -419,7 +419,7 @@ export async function runGeneration(
         event.type === "tool_call" ||
         event.type === "tool_result"
       ) {
-        sendEvent(event as Record<string, unknown>);
+        sendEvent(event as unknown as Record<string, unknown>);
       }
 
       if (event.type === "text" && event.text) {

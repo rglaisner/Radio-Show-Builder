@@ -1078,7 +1078,7 @@ export default function App() {
   ): typeof MOCK_SHOW => {
     return transformShow(
       {
-        ...(data as Parameters<typeof transformShow>[0]),
+        ...(data as unknown as Parameters<typeof transformShow>[0]),
         coverImage:
           (typeof data.coverImage === "string" && data.coverImage) ||
           "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2070&auto=format&fit=crop",
