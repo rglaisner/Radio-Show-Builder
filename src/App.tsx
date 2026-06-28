@@ -82,6 +82,18 @@ function featureFieldId(key: string): string {
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const IS_DEV = !!(import.meta as any).env?.DEV;
+const PLACEHOLDER_FIREBASE_PROJECT_ID = "remixed-project-id";
+
+function isAuthRequired(): boolean {
+  if (IS_DEV) return false;
+  const authOverride = (import.meta as { env?: { VITE_REQUIRE_GOOGLE_AUTH?: string } }).env
+    ?.VITE_REQUIRE_GOOGLE_AUTH;
+  if (authOverride === "true") return true;
+  if (authOverride === "false") return false;
+  return firebaseConfig.projectId !== PLACEHOLDER_FIREBASE_PROJECT_ID;
+}
+
+const AUTH_REQUIRED = isAuthRequired();
 // Dynamically generate the direct published/deployed link for sharing,
 // completely bypassing the AI Studio editor/builder frame to ensure immediate end-user playback for colleagues
 const getPublishedShareLink = (shareId: string) => {
@@ -1138,7 +1150,7 @@ export default function App() {
 
   const handleGenerate = async (e?: React.FormEvent, overridePrompt?: string, overrideDuration?: string, overrideMood?: string) => {
     if (e) e.preventDefault();
-    if (!auth.currentUser && !IS_DEV) {
+    if (!auth.currentUser && AUTH_REQUIRED) {
       await handleSignIn();
       return;
     }
@@ -1767,7 +1779,7 @@ export default function App() {
         <div className="relative z-10 w-full h-full overflow-y-auto">
           <div className="max-w-4xl mx-auto space-y-12 p-6 md:p-16">
             {/* Header */}
-            {!IS_DEV && (authLoading || currentUser) && (
+            {AUTH_REQUIRED && (authLoading || currentUser) && (
               <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white/[0.02] border border-white/5 rounded-2xl p-4 backdrop-blur-md">
                 <div className="flex items-center gap-3">
                   {authLoading ? (
@@ -1862,7 +1874,7 @@ export default function App() {
                 }
                 handleGenerate(e);
               }} className="space-y-4">
-                {currentUser && quota && quota.remaining === 0 && !IS_DEV ? (
+                {quota && quota.remaining === 0 && !IS_DEV ? (
                   <motion.div
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -1941,7 +1953,7 @@ export default function App() {
                       </div>
 
                       {/* Right action button */}
-                      {!currentUser && !IS_DEV ? (
+                      {!currentUser && AUTH_REQUIRED ? (
                         <button
                           type="button"
                           onClick={handleSignIn}
