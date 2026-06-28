@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Play, Pause, Volume2, Info, List, ChevronDown, ChevronUp, Settings2, Clock, Radio,
-  TerminalSquare, CheckCircle2, Loader2, Download, Lock, Key, ShieldAlert, Check,
+  Loader2, Download, Lock, Key, ShieldAlert, Check,
   HelpCircle, User, AlertCircle, RefreshCw, Trash2, ChevronLeft, Share2, Copy, ExternalLink, Globe
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
@@ -19,6 +19,11 @@ import { AuraTorquePulsarSpinner } from './components/AuraTorquePulsarSpinner';
 import { GenerationProgressBar } from './components/GenerationProgressBar';
 import { ShowReadyScreen } from './components/ShowReadyScreen';
 import {
+  GenerationLogPanel,
+  scrubText,
+  type GenerationLogEntry,
+} from './components/generation-log';
+import {
   INITIAL_GENERATION_PROGRESS,
   finalizingProgress,
   progressFromInfoMessage,
@@ -27,6 +32,7 @@ import {
   type GenerationProgress,
 } from './generationProgress';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
+import type { GenerationCheckpoint } from './types';
 import { z } from 'zod';
 import {
   buildShowConfig,
@@ -231,15 +237,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(0.8);
 
-  const [generationLogs, setGenerationLogs] = useState<Array<{
-    id: string;
-    timestamp: string;
-    type: 'info' | 'thinking' | 'tool_call' | 'tool_result' | 'text' | 'error';
-    content?: string;
-    name?: string;
-    args?: any;
-    result?: string;
-  }>>([]);
+  const [generationLogs, setGenerationLogs] = useState<GenerationLogEntry[]>([]);
 
   const [generationComplete, setGenerationComplete] = useState(false);
   const [currentStage, setCurrentStage] = useState('Initializing...');
@@ -249,6 +247,9 @@ export default function App() {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const [hasQuotaError, setHasQuotaError] = useState(false);
+  const [runArtifactsAvailable, setRunArtifactsAvailable] = useState(false);
+  const [failedCheckpoint, setFailedCheckpoint] = useState<GenerationCheckpoint | null>(null);
+  const [salvagedShowAvailable, setSalvagedShowAvailable] = useState(false);
 
   // --- RATE LIMITER & QUOTA STATES ---
   const DAILY_LIMIT = 3;
@@ -349,126 +350,6 @@ export default function App() {
   const applyProgressUpdate = (next: GenerationProgress) => {
     setGenerationProgress(next);
     setCurrentStage(next.subLabel ?? next.stepLabel);
-  };
-
-  const scrubText = (text: string) => {
-    if (!text) return text;
-    // Scrub GEMINI_API_KEY=... and "GEMINI_API_KEY": "..." and raw API keys
-    return text
-      .replace(/(GEMINI_API_KEY\s*(?:=|:)\s*)[^\s"'\\]+/g, '$1***')
-      .replace(/("GEMINI_API_KEY"\s*:\s*")[^"]+"/g, '$1***"')
-      .replace(/AIza[a-zA-Z0-9_-]{35}/g, '***')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  };
-
-  const renderMarkdown = (text: string) => {
-    let html = text
-      .replace(/```([\s\S]*?)```/g, '<pre class="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5 my-2">$1</pre>')
-      .replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1 py-0.5 rounded text-io-blue font-mono text-[10px]">$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-      .replace(/\n/g, '<br/>');
-    return <div dangerouslySetInnerHTML={{ __html: html }} />;
-  };
-
-  const humanizeToolName = (name: string) => {
-    const map: Record<string, string> = {
-      'read_file': 'Read file',
-      'list_files': 'List files',
-      'bash': 'Run command',
-      'google_search': 'Google search',
-      'code_execution_call': 'Run command',
-    };
-    return map[name] || name;
-  };
-
-  const formatToolResult = (name: string | undefined, rawResult: string | undefined) => {
-    if (!rawResult) return null;
-
-    const unwrap = (str: any): any => {
-      let current = str;
-      for (let i = 0; i < 5; i++) {
-        if (typeof current === 'string') {
-          const trimmed = current.trim();
-          if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('"')) {
-            try {
-              current = JSON.parse(trimmed);
-            } catch (e) {
-              // If it fails to parse but starts and ends with quotes, try stripping them and unescaping
-              if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-                try {
-                  const unescaped = trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-                  current = JSON.parse(unescaped);
-                } catch (e2) {
-                  break;
-                }
-              } else {
-                break;
-              }
-            }
-          } else {
-            break;
-          }
-        } else {
-          break;
-        }
-      }
-      return current;
-    };
-
-    let data = unwrap(rawResult);
-    if (data && typeof data === 'object' && 'result' in data) {
-      const inner = unwrap(data.result);
-      if (inner && typeof inner === 'object') {
-        data = inner;
-      } else if (typeof inner === 'string') {
-        data = inner;
-      }
-    }
-
-    if (name === 'list_files' && data && Array.isArray(data.files)) {
-      return (
-        <div className="bg-black/40 p-3 rounded-lg border border-white/5">
-          <div className="flex flex-col gap-1 py-1">
-            {data.files.map((f: string, i: number) => (
-              <div key={i} className="flex items-center gap-2 text-white/70 font-mono text-[10px]">
-                <div className="w-1 h-1 rounded-full bg-white/30" />
-                <span>{f}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    }
-
-    let textToShow = '';
-    if (name === 'read_file' && data && typeof data.content === 'string') {
-      textToShow = data.content;
-    } else if (name === 'read_file' && data && typeof data.error === 'string') {
-      textToShow = data.error;
-    } else if (name === 'bash' && data) {
-      if (typeof data.output === 'string') {
-        textToShow = data.output;
-      } else if (typeof data.error === 'string') {
-        textToShow = data.error;
-      } else if (typeof data === 'object') {
-        textToShow = JSON.stringify(data, null, 2);
-      } else {
-        textToShow = String(data);
-      }
-    } else if (typeof data === 'object') {
-      textToShow = JSON.stringify(data, null, 2);
-    } else {
-      textToShow = String(data);
-    }
-
-    textToShow = textToShow.replace(/\\n/g, '\n').replace(/\\"/g, '"');
-
-    return (
-      <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
-        {scrubText(textToShow)}
-      </pre>
-    );
   };
 
   const downloadLogs = () => {
@@ -1148,6 +1029,51 @@ export default function App() {
     setConfigError(null);
   };
 
+  const applyGenerationPayload = (
+    data: Record<string, unknown>,
+    generationId: string,
+    completeness?: string
+  ): typeof MOCK_SHOW => {
+    return transformShow(
+      {
+        ...(data as Parameters<typeof transformShow>[0]),
+        coverImage:
+          (typeof data.coverImage === "string" && data.coverImage) ||
+          "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2070&auto=format&fit=crop",
+      },
+      {
+        generationId,
+        isPartial: completeness !== "full",
+      }
+    );
+  };
+
+  const persistCheckpointFromEvent = (checkpoint: GenerationCheckpoint) => {
+    setFailedCheckpoint(checkpoint);
+    try {
+      sessionStorage.setItem(
+        `checkpoint:${checkpoint.generationId}`,
+        JSON.stringify(checkpoint)
+      );
+    } catch (storageError) {
+      console.warn("Failed to persist checkpoint in sessionStorage:", storageError);
+    }
+  };
+
+  const finalizeGeneratedShow = async (show: typeof MOCK_SHOW) => {
+    const userShow = { ...show, isUserGenerated: true };
+    try {
+      await saveUserShow(userShow);
+    } catch (saveError) {
+      console.error("Error saving new show to IndexedDB:", saveError);
+    }
+    setSelectedShow(userShow);
+    setLibrary((prev) => [userShow, ...prev]);
+    setPrompt("");
+    refreshQuota();
+    setGenerationComplete(true);
+  };
+
   const handleGenerate = async (e?: React.FormEvent, overridePrompt?: string, overrideDuration?: string, overrideMood?: string) => {
     if (e) e.preventDefault();
     if (!auth.currentUser && AUTH_REQUIRED) {
@@ -1172,6 +1098,9 @@ export default function App() {
     setView('generating');
     setGenerationLogs([]);
     setHasQuotaError(false);
+    setRunArtifactsAvailable(false);
+    setFailedCheckpoint(null);
+    setSalvagedShowAvailable(false);
 
     setStartTime(Date.now());
     setElapsedTime(0);
@@ -1389,10 +1318,32 @@ export default function App() {
                }]);
             } else if (event.type === "show_data" && event.data) {
                console.log("[Client] Received show_data payload! Updating UI selection and library.", event.data);
-               generatedShow = transformShow({
-                 ...event.data,
-                 coverImage: event.data.coverImage || "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=2070&auto=format&fit=crop"
+               generatedShow = applyGenerationPayload(event.data, generationId, "full");
+            } else if (event.type === "salvage_data" && event.data) {
+               console.log("[Client] Received salvage_data payload:", event.completeness, event.data);
+               generatedShow = applyGenerationPayload(
+                 event.data,
+                 generationId,
+                 event.completeness ?? event.data.completeness
+               );
+               const completeness = event.completeness ?? event.data.completeness;
+               setSalvagedShowAvailable(
+                 completeness === "playable" || completeness === "full"
+               );
+            } else if (event.type === "checkpoint" && event.data) {
+               persistCheckpointFromEvent({
+                 generationId: event.data.generationId ?? generationId,
+                 lastCompletedStep: event.data.lastCompletedStep ?? 0,
+                 canResume: Boolean(event.data.canResume),
+                 completeness: event.data.completeness,
+                 interactionId: event.data.interactionId,
+                 environmentId: event.data.environmentId,
+                 status: event.data.status ?? "failed",
                });
+            } else if (event.type === "run_artifacts" && event.generationId) {
+               if (event.hasAudio || event.hasShowNotes) {
+                 setRunArtifactsAvailable(true);
+               }
             }
           } catch (e) {
             console.error("Error parsing event:", e, dataStr);
@@ -1404,25 +1355,10 @@ export default function App() {
       applyProgressUpdate(finalizingProgress());
 
       if (generatedShow) {
-        const userShow = { ...generatedShow, isUserGenerated: true };
-
-        try {
-          await saveUserShow(userShow);
-        } catch (e) {
-          console.error("Error saving new show to IndexedDB:", e);
-        }
-
-        setSelectedShow(userShow);
-        setLibrary(prev => [userShow, ...prev]);
-        setPrompt('');
-        refreshQuota();
+        await finalizeGeneratedShow(generatedShow);
       }
 
       await new Promise(resolve => setTimeout(resolve, 500));
-
-      if (generatedShow) {
-        setGenerationComplete(true);
-      }
 
       setIsFinalizing(false);
 
@@ -1472,6 +1408,234 @@ export default function App() {
     setGenerationComplete(false);
     setShowGenerationLog(false);
     setIsFinalizing(false);
+    setRunArtifactsAvailable(false);
+    setFailedCheckpoint(null);
+    setSalvagedShowAvailable(false);
+  };
+
+  const consumeGenerationResponse = async (
+    response: Response,
+    generationId: string
+  ): Promise<typeof MOCK_SHOW | null> => {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("No response body");
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let generatedShow: typeof MOCK_SHOW | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.trim() || !line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6);
+        if (dataStr === "[DONE]") continue;
+
+        try {
+          const event = JSON.parse(dataStr);
+          const timestamp = new Date().toISOString().split("T")[1].split(".")[0];
+
+          if (event.type === "info" || event.type === "error") {
+            if (event.type === "info" && typeof event.message === "string") {
+              setGenerationProgress((prev) => {
+                const next = progressFromInfoMessage(event.message, prev);
+                setCurrentStage(next.subLabel ?? next.stepLabel);
+                return next;
+              });
+            }
+            setGenerationLogs((prev) => [
+              ...prev,
+              {
+                id: Math.random().toString(),
+                timestamp,
+                type: event.type,
+                content: event.message,
+              },
+            ]);
+          } else if (event.type === "thinking" || event.type === "text") {
+            setGenerationLogs((prev) => [
+              ...prev,
+              {
+                id: Math.random().toString(),
+                timestamp,
+                type: event.type,
+                content: typeof event.text === "string" ? event.text : "",
+              },
+            ]);
+          } else if (event.type === "tool_call") {
+            const toolProgress = progressFromToolCall(event.name, event.arguments);
+            if (toolProgress) applyProgressUpdate(toolProgress);
+            setGenerationLogs((prev) => [
+              ...prev,
+              {
+                id: Math.random().toString(),
+                timestamp,
+                type: "tool_call",
+                name: event.name,
+                args: event.arguments,
+              },
+            ]);
+          } else if (event.type === "tool_result") {
+            let resultText = event.result || "";
+            if (resultText.length > 4000) {
+              resultText = `${resultText.substring(0, 4000)}...`;
+            }
+            setGenerationProgress((prev) => {
+              const next = progressFromToolResult(event.name, resultText, prev);
+              setCurrentStage(next.subLabel ?? next.stepLabel);
+              return next;
+            });
+            setGenerationLogs((prev) => [
+              ...prev,
+              {
+                id: Math.random().toString(),
+                timestamp,
+                type: "tool_result",
+                name: event.name,
+                result: resultText,
+              },
+            ]);
+          } else if (event.type === "show_data" && event.data) {
+            generatedShow = applyGenerationPayload(event.data, generationId, "full");
+          } else if (event.type === "salvage_data" && event.data) {
+            generatedShow = applyGenerationPayload(
+              event.data,
+              generationId,
+              event.completeness ?? event.data.completeness
+            );
+            const completeness = event.completeness ?? event.data.completeness;
+            setSalvagedShowAvailable(
+              completeness === "playable" || completeness === "full"
+            );
+          } else if (event.type === "checkpoint" && event.data) {
+            persistCheckpointFromEvent({
+              generationId: event.data.generationId ?? generationId,
+              lastCompletedStep: event.data.lastCompletedStep ?? 0,
+              canResume: Boolean(event.data.canResume),
+              completeness: event.data.completeness,
+              interactionId: event.data.interactionId,
+              environmentId: event.data.environmentId,
+              status: event.data.status ?? "failed",
+            });
+          } else if (event.type === "run_artifacts" && event.generationId) {
+            if (event.hasAudio || event.hasShowNotes) {
+              setRunArtifactsAvailable(true);
+            }
+          }
+        } catch (parseError) {
+          console.error("Error parsing generation event:", parseError, dataStr);
+        }
+      }
+    }
+
+    return generatedShow;
+  };
+
+  const handleResumeFromCheckpoint = async () => {
+    const generationId = generationIdRef.current;
+    if (!generationId) return;
+
+    setIsGenerating(true);
+    setIsFinalizing(false);
+    setGenerationComplete(false);
+    setHasQuotaError(false);
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const response = await fetch("/api/resume-show", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ generationId }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof errData.error === "string" ? errData.error : `Resume failed (${response.status})`
+        );
+      }
+
+      setIsFinalizing(true);
+      applyProgressUpdate(finalizingProgress());
+      const generatedShow = await consumeGenerationResponse(response, generationId);
+      if (generatedShow) {
+        await finalizeGeneratedShow(generatedShow);
+      }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        const errMsg = error instanceof Error ? error.message : "Unknown error";
+        setGenerationLogs((prev) => [
+          ...prev,
+          {
+            id: Math.random().toString(),
+            timestamp: new Date().toISOString().split("T")[1].split(".")[0],
+            type: "error",
+            content: `Resume error: ${errMsg}`,
+          },
+        ]);
+      }
+    } finally {
+      setIsGenerating(false);
+      setIsFinalizing(false);
+    }
+  };
+
+  const handleManualSalvage = async () => {
+    const generationId = generationIdRef.current;
+    if (!generationId) return;
+
+    setIsGenerating(true);
+    setIsFinalizing(false);
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const response = await fetch("/api/salvage-show", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ generationId }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Salvage failed (${response.status})`);
+      }
+
+      setIsFinalizing(true);
+      applyProgressUpdate(finalizingProgress());
+      const generatedShow = await consumeGenerationResponse(response, generationId);
+      if (generatedShow) {
+        await finalizeGeneratedShow(generatedShow);
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : "Unknown error";
+      setGenerationLogs((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          timestamp: new Date().toISOString().split("T")[1].split(".")[0],
+          type: "error",
+          content: `Salvage error: ${errMsg}`,
+        },
+      ]);
+    } finally {
+      setIsGenerating(false);
+      setIsFinalizing(false);
+    }
+  };
+
+  const downloadPartialRunAssets = () => {
+    const id = generationIdRef.current;
+    if (!id) return;
+    window.open(`/api/runs/${encodeURIComponent(id)}/bundle`, "_blank", "noopener,noreferrer");
   };
 
   const selectShow = (show: typeof MOCK_SHOW) => {
@@ -1507,126 +1671,34 @@ export default function App() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [isScrolledToBottom, setIsScrolledToBottom] = useState(true);
-
-  const handleScroll = () => {
-    if (scrollRef.current) {
-      const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-      setIsScrolledToBottom(scrollHeight - scrollTop - clientHeight < 50);
-    }
-  };
-
-  useEffect(() => {
-    if (scrollRef.current && view === 'generating' && isScrolledToBottom && !generationComplete) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [generationLogs, view, isScrolledToBottom, generationComplete]);
-
-  const renderGenerationLogEntries = () => (
-    <AnimatePresence>
-      {generationLogs.map((log) => {
-        if (log.type === 'tool_call' && (!log.args || Object.keys(log.args).length === 0)) {
-          return null;
-        }
-
-        let prefix = 'Info';
-        let color = 'text-white/60';
-        let Icon = Info;
-
-        if (log.type === 'tool_call') {
-          prefix = 'Action';
-          color = 'text-io-blue';
-          Icon = Settings2;
-        } else if (log.type === 'tool_result') {
-          prefix = 'Result';
-          color = 'text-io-green';
-          Icon = CheckCircle2;
-        } else if (log.type === 'thinking' || log.type === 'text') {
-          prefix = 'Log';
-          color = 'text-white/80';
-          Icon = TerminalSquare;
-        } else if (log.type === 'error') {
-          prefix = 'Error';
-          color = 'text-red-400';
-          Icon = Info;
-        }
-
-        return (
-          <motion.div
-            key={log.id}
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="flex gap-4 md:gap-6 font-mono text-xs md:text-sm group"
-          >
-            <div className="w-16 shrink-0 text-white/40 text-right pt-0.5">
-              {log.timestamp}
-            </div>
-            <div className="flex gap-3 w-28 shrink-0 items-start pt-0.5">
-              <Icon className={`w-4 h-4 ${color} shrink-0`} />
-              <span className={`${color} font-bold uppercase tracking-wider text-[10px] mt-0.5 w-full`}>{prefix}</span>
-            </div>
-            <div className="flex-1 break-words whitespace-pre-wrap text-white/80 leading-relaxed max-w-2xl bg-white/[0.02] px-3 py-2 -mt-2 rounded border border-transparent hover:border-white/5 transition-colors">
-              {log.type === 'tool_call' ? (
-                <div className="space-y-2">
-                  <div className="font-bold text-io-blue">{humanizeToolName(log.name || '')}</div>
-                  {log.name === 'read_file' && log.args?.path ? (
-                    <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
-                      <span className="text-white/40">path:</span> {log.args.path}
-                    </div>
-                  ) : log.name === 'list_files' && log.args?.path ? (
-                    <div className="bg-black/40 p-3 rounded-lg text-white/70 font-mono text-[10px] border border-white/5">
-                      <span className="text-white/40">path:</span> {log.args.path}
-                    </div>
-                  ) : log.args && log.args.command ? (
-                    <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
-                      {scrubText(log.args.command)}
-                    </pre>
-                  ) : log.args && log.args.code ? (
-                    <div className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto font-mono text-[10px] border border-white/5">
-                      {log.args.language && <div className="text-white/40 mb-1">{log.args.language}</div>}
-                      <pre className="whitespace-pre-wrap">{scrubText(log.args.code)}</pre>
-                    </div>
-                  ) : log.args && Object.keys(log.args).length > 0 ? (
-                    <pre className="bg-black/40 p-3 rounded-lg text-white/70 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] border border-white/5">
-                      {scrubText(JSON.stringify(log.args, null, 2))}
-                    </pre>
-                  ) : null}
-                </div>
-              ) : log.type === 'tool_result' ? (
-                <div className="space-y-2">
-                  <div className={`font-bold ${log.result?.includes('"error"') || log.result?.startsWith('Error:') ? 'text-red-400' : 'text-io-green'}`}>
-                    Result: {humanizeToolName(log.name || 'output')}
-                  </div>
-                  {formatToolResult(log.name, log.result)}
-                </div>
-              ) : (
-                renderMarkdown(scrubText(log.content || ''))
-              )}
-            </div>
-          </motion.div>
-        );
-      })}
-    </AnimatePresence>
-  );
-
-  const generationLogPanel = (
-    <div className="flex flex-col min-h-0 flex-1">
-      <div className="h-10 border-b border-white/5 flex items-center px-4 bg-white/[0.02] shrink-0">
-        <span className="font-mono text-[10px] text-white/30 uppercase tracking-widest font-bold">Process Log</span>
-      </div>
-      <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-4 min-h-0">
-        {renderGenerationLogEntries()}
-      </div>
-    </div>
-  );
-
   const generationElapsedFooter = startTime ? (
-    <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest">
+    <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest shrink-0 hidden sm:block">
       Elapsed: {formatElapsed(elapsedTime)} <span className="opacity-30">/</span>{' '}
       <span className="text-io-blue font-bold">Est: ~5 mins</span>
     </p>
   ) : null;
+
+  const generationLogFooter = isGenerating ? (
+    <div className="flex flex-col items-center gap-4 pt-4 pb-2">
+      <p className="text-io-blue/80 font-mono text-[10px] uppercase tracking-widest">Agent working…</p>
+      <button
+        type="button"
+        onClick={handleStop}
+        className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl font-bold text-xs tracking-widest uppercase transition-colors border border-red-500/20 cursor-pointer"
+      >
+        Stop Agent
+      </button>
+    </div>
+  ) : null;
+
+  const generationLogPanel = (
+    <GenerationLogPanel
+      logs={generationLogs}
+      autoScroll={!generationComplete}
+      headerExtra={generationElapsedFooter}
+      footer={generationLogFooter}
+    />
+  );
 
   if (view === 'generating') {
     if (generationComplete) {
@@ -1693,7 +1765,41 @@ export default function App() {
                   </p>
                 </motion.div>
               ) : null}
-              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              {runArtifactsAvailable ? (
+                <p className="text-white/70 text-xs leading-relaxed">
+                  Some audio or metadata from this run was saved. You can download partial assets even though the show did not finish in the library.
+                </p>
+              ) : null}
+              {failedCheckpoint?.canResume ? (
+                <p className="text-white/70 text-xs leading-relaxed">
+                  Generation stopped after step {failedCheckpoint.lastCompletedStep} of 11.
+                  You can retry from the next step without using another daily show credit.
+                </p>
+              ) : null}
+              {salvagedShowAvailable ? (
+                <p className="text-amber-200/90 text-xs leading-relaxed">
+                  A partial show was recovered and saved to your library.
+                </p>
+              ) : null}
+              <div className="flex flex-col sm:flex-row gap-3 justify-center flex-wrap">
+                {failedCheckpoint?.canResume ? (
+                  <button
+                    type="button"
+                    onClick={handleResumeFromCheckpoint}
+                    className="px-8 py-3 bg-io-blue text-white rounded-xl font-bold text-sm tracking-widest uppercase cursor-pointer"
+                  >
+                    Retry from step {failedCheckpoint.lastCompletedStep + 1}
+                  </button>
+                ) : null}
+                {!salvagedShowAvailable && generationIdRef.current ? (
+                  <button
+                    type="button"
+                    onClick={handleManualSalvage}
+                    className="px-8 py-3 bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-400/30 rounded-xl font-bold text-sm tracking-widest uppercase cursor-pointer"
+                  >
+                    Try Salvage
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -1711,6 +1817,15 @@ export default function App() {
                 >
                   Download Logs
                 </button>
+                {runArtifactsAvailable ? (
+                  <button
+                    type="button"
+                    onClick={downloadPartialRunAssets}
+                    className="px-8 py-3 bg-io-blue/20 hover:bg-io-blue/30 text-io-blue border border-io-blue/30 rounded-xl font-bold text-sm tracking-widest uppercase cursor-pointer"
+                  >
+                    Download Partial Assets
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1719,52 +1834,33 @@ export default function App() {
     }
 
     return (
-      <div className="fixed inset-0 w-full h-full bg-black text-white flex flex-col items-center justify-center p-6 overflow-hidden pb-10">
+      <div className="fixed inset-0 w-full h-dvh bg-black text-white flex flex-col overflow-hidden">
         <RainbowBackground />
 
-        <div className="w-full max-w-4xl relative z-10 flex flex-col h-full overflow-hidden">
-          <div className="text-center space-y-4 mb-6 shrink-0 mt-6">
-            <div className="flex justify-center mb-2">
-              <AuraTorquePulsarSpinner size={80} />
+        <div className="relative z-10 w-full max-w-4xl mx-auto flex flex-col flex-1 min-h-0 px-3 sm:px-6 pt-3 sm:pt-6 pb-3 sm:pb-4">
+          <div className="shrink-0 mb-3 sm:mb-4 space-y-3">
+            <div className="flex items-center gap-3">
+              <AuraTorquePulsarSpinner size={44} className="shrink-0 sm:hidden" />
+              <AuraTorquePulsarSpinner size={56} className="shrink-0 hidden sm:block" />
+              <div className="flex-1 min-w-0">
+                <h2 className="text-base sm:text-xl font-bold tracking-tight text-white/90 truncate">
+                  {currentStage}
+                </h2>
+                <p className="text-white/40 font-medium text-xs sm:text-sm truncate mt-0.5">
+                  &ldquo;{activePrompt}&rdquo;
+                </p>
+              </div>
+              {startTime ? (
+                <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest shrink-0 sm:hidden">
+                  {formatElapsed(elapsedTime)}
+                </p>
+              ) : null}
             </div>
-            <h2 className="text-xl font-bold tracking-tight text-white/90">{currentStage}</h2>
-            <p className="text-white/40 font-medium text-sm max-w-lg mx-auto">
-              Creating custom radio show about: &ldquo;{activePrompt}&rdquo;
-            </p>
             <GenerationProgressBar progress={generationProgress} compact finalizing={isFinalizing} />
           </div>
 
-          <div className="flex-1 overflow-hidden relative rounded-3xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl flex flex-col min-h-0">
-            <div className="h-12 border-b border-white/5 flex items-center px-6 gap-2 bg-white/[0.02] shrink-0 justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-white/20" />
-                <div className="w-3 h-3 rounded-full bg-white/20" />
-                <div className="w-3 h-3 rounded-full bg-white/20" />
-                <span className="font-mono text-[10px] text-white/30 uppercase tracking-widest ml-4 font-bold">Process Log</span>
-              </div>
-              {generationElapsedFooter}
-            </div>
-
-            <div
-              ref={scrollRef}
-              onScroll={handleScroll}
-              className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-4"
-            >
-              {renderGenerationLogEntries()}
-
-              {isGenerating ? (
-                <div className="flex flex-col items-center gap-4 pt-4">
-                  <p className="text-io-blue/80 font-mono text-[10px] uppercase tracking-widest">Agent working…</p>
-                  <button
-                    type="button"
-                    onClick={handleStop}
-                    className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl font-bold text-xs tracking-widest uppercase transition-colors border border-red-500/20 cursor-pointer"
-                  >
-                    Stop Agent
-                  </button>
-                </div>
-              ) : null}
-            </div>
+          <div className="flex-1 overflow-hidden relative rounded-2xl sm:rounded-3xl bg-white/[0.02] border border-white/10 backdrop-blur-md shadow-2xl flex flex-col min-h-0">
+            {generationLogPanel}
           </div>
         </div>
       </div>
