@@ -6,8 +6,15 @@ import path from "path";
 // Load .env then .env.local (local overrides) so GEMINI_API_KEY is available to the Express server.
 dotenv.config({ path: path.join(process.cwd(), ".env") });
 dotenv.config({ path: path.join(process.cwd(), ".env.local"), override: true });
-import { createInteraction, streamInteraction, API_BASE_URL } from "./server/lib/agentClient.ts";
-import { extractJsonBlocks } from "./server/lib/jsonExtractor.ts";
+import { API_BASE_URL } from "./server/lib/agentClient.ts";
+import {
+  cleanUpOldRunArtifacts,
+  loadRunManifest,
+  resolveRunFilePath,
+} from "./server/lib/workspaceArchive.ts";
+import { runGeneration, salvageFromCheckpoint } from "./server/lib/generationRunner.ts";
+import { loadCheckpoint, cleanExpiredCheckpoints } from "./server/lib/checkpointStore.ts";
+import { buildResumePrompt } from "./server/lib/resumePrompt.ts";
 import { parseShowConfigRequest } from "./src/showConfig.ts";
 import { buildAgentPrompt, serializeShowConfig } from "./server/lib/showConfigPrompt.ts";
 import { ZodError } from "zod";
@@ -17,12 +24,38 @@ import fs from "fs";
 import { Storage } from "@google-cloud/storage";
 import crypto from "crypto";
 import admin from "firebase-admin";
+import archiver from "archiver";
 
 const execAsync = util.promisify(exec);
 
 function getGeminiApiKey(): string | undefined {
   const key = process.env.GEMINI_API_KEY?.trim();
   return key || undefined;
+}
+
+async function probeGeminiApiAccess(apiKey: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/models?key=${encodeURIComponent(apiKey)}&pageSize=1`);
+    if (response.ok) {
+      return { ok: true };
+    }
+    const body = await response.text();
+    const isQuotaError =
+      response.status === 429 ||
+      body.toLowerCase().includes("quota") ||
+      body.toLowerCase().includes("resource_exhausted") ||
+      body.toLowerCase().includes("spending cap");
+    if (isQuotaError) {
+      return {
+        ok: false,
+        message: `Gemini API Quota Limit Reached: ${body.slice(0, 500)}. Check billing at https://ai.studio/spend`,
+      };
+    }
+    return { ok: false, message: `Gemini API probe failed (${response.status}): ${body.slice(0, 300)}` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { ok: false, message: `Gemini API probe failed: ${message}` };
+  }
 }
 
 function getGcsBucketName(): string | null {
@@ -32,55 +65,6 @@ function getGcsBucketName(): string | null {
   }
   return bucket.trim();
 }
-
-function extractTarInMemory(tarBuffer: Buffer): Record<string, Buffer> {
-  const files: Record<string, Buffer> = {};
-  let offset = 0;
-
-  while (offset + 512 <= tarBuffer.length) {
-    let isEnd = true;
-    for (let i = 0; i < 512; i++) {
-      if (tarBuffer[offset + i] !== 0) {
-        isEnd = false;
-        break;
-      }
-    }
-    if (isEnd) break;
-
-    let name = "";
-    for (let i = 0; i < 100; i++) {
-      const charCode = tarBuffer[offset + i];
-      if (charCode === 0) break;
-      name += String.fromCharCode(charCode);
-    }
-    name = name.trim();
-
-    let sizeStr = "";
-    for (let i = 124; i < 136; i++) {
-      const charCode = tarBuffer[offset + i];
-      if (charCode === 0 || charCode === 32) continue;
-      sizeStr += String.fromCharCode(charCode);
-    }
-    const size = parseInt(sizeStr, 8);
-
-    const typeflag = tarBuffer[offset + 156];
-    const isRegularFile = typeflag === 0 || typeflag === 48;
-
-    offset += 512; // skip header
-
-    if (name && isRegularFile && !isNaN(size) && size > 0) {
-      if (offset + size <= tarBuffer.length) {
-        files[name] = tarBuffer.subarray(offset, offset + size);
-      }
-    }
-
-    const paddedSize = Math.ceil(size / 512) * 512;
-    offset += paddedSize;
-  }
-
-  return files;
-}
-
 
 function loadAgentFiles(dir: string, basePath: string): Array<{type: string, content: string, target: string}> {
   let files: Array<{type: string, content: string, target: string}> = [];
@@ -117,6 +101,8 @@ function cleanUpOldGenerations() {
     for (const item of items) {
       if (item.startsWith('.')) continue; // ignore hidden items
       if (item === 'shares') continue; // DO NOT CLEAN UP SHARED EPISODES!
+      if (item === 'runs') continue; // run artifact vault uses separate retention
+      if (item === 'checkpoints') continue; // checkpoint store uses separate retention
       const itemPath = path.join(outputDir, item);
       const stats = fs.statSync(itemPath);
       
@@ -152,6 +138,8 @@ async function startServer() {
 
   // Run initial cleanup on startup
   cleanUpOldGenerations();
+  cleanUpOldRunArtifacts(7);
+  cleanExpiredCheckpoints();
 
   app.use(express.json({ limit: '50mb' }));
   app.use('/output', express.static(path.join(process.cwd(), 'output')));
@@ -584,6 +572,7 @@ async function startServer() {
   app.post("/api/generate-show", async (req, res) => {
     // Run background cleanup list whenever a new show is request to optimize disk space
     cleanUpOldGenerations();
+    cleanUpOldRunArtifacts(7);
 
     const { generationId } = req.body;
 
@@ -672,6 +661,13 @@ async function startServer() {
         return;
       }
 
+      const apiProbe = await probeGeminiApiAccess(geminiApiKey);
+      if (!apiProbe.ok) {
+        sendEvent({ type: "error", message: apiProbe.message });
+        res.end();
+        return;
+      }
+
       sendEvent({ type: "info", message: "Provisioning environment..." });
 
       console.log(`[generate-show] Loading agent files from filesystem path: ${path.join(process.cwd(), "agent")}`);
@@ -683,183 +679,18 @@ async function startServer() {
       });
       console.log(`[generate-show] Finished loading agent files recursively. Count: ${agentFiles.length} (includes show_config.json)`);
 
-      console.log(`[generate-show] Calling createInteraction with prompt: "${prompt.substring(0, 100)}..."`);
-      const response = await createInteraction({
+      const result = await runGeneration({
+        generationId: generationId ?? `gen-${Date.now()}`,
+        showConfig,
         prompt,
-        stream: true,
+        apiKey: geminiApiKey,
+        signal: abortController.signal,
+        sendEvent,
         inlineSources: agentFiles.length > 0 ? agentFiles : undefined,
-        signal: abortController.signal
       });
 
-      console.log(`[generate-show] Gemini API responded. HTTP Status: ${response.status} ${response.statusText}`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[generate-show] Gemini API Non-2xx response. Error Payload: ${errorText}`);
-
-        let displayMessage = `Agent API error: ${response.status} - ${errorText}`;
-        try {
-          const parsed = JSON.parse(errorText);
-          if (parsed?.error?.message) {
-            displayMessage = parsed.error.message;
-          }
-        } catch (e) {
-          // ignore parsing error, stick to default
-        }
-
-        const isQuotaError = 
-          response.status === 429 || 
-          errorText.toLowerCase().includes("quota") || 
-          errorText.toLowerCase().includes("too_many_requests") || 
-          errorText.toLowerCase().includes("resource_exhausted") ||
-          displayMessage.toLowerCase().includes("quota") ||
-          displayMessage.toLowerCase().includes("too_many_requests");
-
-        if (isQuotaError) {
-          displayMessage = `Gemini API Quota Limit Reached: ${displayMessage}. The shared free-tier Google Gemini API Key has run out of request quota. To resolve this, go to Settings > Secrets inside AI Studio to verify your personal Gemini API key or set up billing.`;
-        }
-
-        sendEvent({ type: "error", message: displayMessage });
-        res.end();
-        return;
-      }
-
-      console.log(`[generate-show] Response remains ok. Constructing SSE stream reader...`);
-      let accumulatedText = "";
-      let envId: string | undefined;
-
-      let eventCount = 0;
-      for await (const event of streamInteraction(response)) {
-        eventCount++;
-        console.log(`[generate-show] SSE yields streaming event #${eventCount}: type="${event.type}"`);
-        if (event.type === "done") {
-          console.log(`[generate-show] Received explicit "done" marker from interaction stream.`);
-          break;
-        }
-        if (event.type === "complete") {
-          envId = (event.interaction?.environment as any)?.env_id || event.interaction?.environment_id;
-          console.log(`[generate-show] Interaction completed. Extracted environment ID: "${envId}"`);
-          const usage = event.interaction?.usage as any;
-          if (usage) {
-            console.log(`[agent] Token usage: ${usage.total_tokens} total tokens (${usage.total_input_tokens} input, ${usage.total_output_tokens} output, ${usage.total_thought_tokens || 0} thought, ${usage.total_cached_tokens || 0} cached)`);
-          }
-
-          // Fallback extraction: iterate and combine text from all elements of the steps array 
-          const stepsObj = event.interaction?.steps as any[];
-          if (Array.isArray(stepsObj)) {
-            let combinedStepsText = "";
-            for (const step of stepsObj) {
-              const isReasoningStep = step.type === 'thinking' || step.type === 'thought' || step.type === 'reasoning';
-              if (!isReasoningStep && Array.isArray(step.content)) {
-                for (const part of step.content) {
-                  if (part && typeof part === 'object') {
-                    if (part.type === 'text' && part.text) {
-                      combinedStepsText += part.text;
-                    } else if (part.text && part.type !== 'thought') {
-                      combinedStepsText += part.text;
-                    }
-                  } else if (typeof part === 'string') {
-                    combinedStepsText += part;
-                  }
-                }
-              }
-            }
-            if (combinedStepsText && combinedStepsText.length > accumulatedText.length) {
-              console.log(`[generate-show] Dynamic steps recovery: Reconstructed text of length ${combinedStepsText.length} exceeds accumulated text of length ${accumulatedText.length}. Restoring fallback text.`);
-              accumulatedText = combinedStepsText;
-            }
-          }
-        }
-
-        // Log events to the terminal as well
-        if (event.type === "thinking") console.log(`[agent] thinking delta: ${event.text?.substring(0, 30)}...`);
-        else if (event.type === "tool_call") {
-          console.log(`[agent] tool_call: ${event.name}`);
-          console.log(`[agent] args:`, JSON.stringify(event.arguments, null, 2));
-        }
-        else if (event.type === "tool_result") {
-          console.log(`[agent] tool_result for tool: ${event.name}`);
-        }
-        else if (event.type === "text") {
-          console.log(`[agent] text output segment: ${event.text?.substring(0, 30)}...`);
-        }
-
-        sendEvent(event);
-
-        if (event.type === "text" && event.text) {
-          accumulatedText += event.text;
-        }
-      }
-
-      // Check for JSON blocks fallback after full stream completion to avoid overwhelming stream buffers
-      if (accumulatedText) {
-        try {
-          const blocks = extractJsonBlocks(accumulatedText);
-          if (blocks.length > 0) {
-            sendEvent({ type: "show_data", data: blocks[blocks.length - 1] });
-          }
-        } catch (e) {
-          console.error("Failed to parse JSON blocks fallback from accumulated text:", e);
-        }
-      }
-
-      if (envId) {
-        sendEvent({ type: "info", message: "Processing final audio and metadata in memory..." });
-        try {
-          const downloadUrl = `${API_BASE_URL}/files/environment-${envId}:download?alt=media`;
-          const res = await fetch(downloadUrl, {
-            headers: { "x-goog-api-key": process.env.GEMINI_API_KEY || "" }
-          });
-
-          if (res.ok) {
-            const arrayBuffer = await res.arrayBuffer();
-            const tarBuffer = Buffer.from(arrayBuffer);
-            const extractedFiles = extractTarInMemory(tarBuffer);
-
-            let showNotes: any = null;
-            let audioBase64 = "";
-            let coverBase64 = "";
-
-            for (const [filePath, fileContent] of Object.entries(extractedFiles)) {
-              if (filePath.endsWith("show_notes.json")) {
-                try {
-                  showNotes = JSON.parse(fileContent.toString("utf8"));
-                } catch (err) {
-                  console.error("Failed to parse show_notes.json from memory:", err);
-                }
-              } else if (filePath.endsWith("ai_radio.mp3")) {
-                audioBase64 = fileContent.toString("base64");
-              } else if (filePath.endsWith("cover.png") || filePath.endsWith("cover.jpg") || filePath.endsWith("cover.jpeg")) {
-                coverBase64 = fileContent.toString("base64");
-              }
-            }
-
-            if (showNotes) {
-              if (audioBase64) {
-                showNotes.audioUrl = `data:audio/mp3;base64,${audioBase64}`;
-              }
-              if (coverBase64) {
-                showNotes.coverImage = `data:image/png;base64,${coverBase64}`;
-              }
-              showNotes.isBase64Encoded = true;
-              sendEvent({ type: "show_data", data: showNotes });
-            } else {
-              console.error("show_notes.json was not found in the extracted tar archive");
-              sendEvent({ type: "error", message: "Successfully extracted the archive but show_notes.json of the show was missing." });
-            }
-          } else {
-            const errBody = await res.text();
-            console.error("Failed to download snapshot:", errBody);
-            sendEvent({ type: "error", message: `Failed to retrieve files from simulation: ${errBody}` });
-          }
-        } catch (err: any) {
-          console.error("Error processing snapshot in memory:", err);
-          sendEvent({ type: "error", message: `Error extracted show files: ${err.message}` });
-        }
-      }
-
       isFinished = true;
-      sendEvent({ type: "status", status: "completed" });
+      sendEvent({ type: "status", status: result.showDelivered ? "completed" : "failed" });
     } catch (err: any) {
       if (err.name === 'AbortError') {
         console.log(`[generate-show] Agent interaction aborted successfully.`);
@@ -875,6 +706,199 @@ async function startServer() {
       }
       res.end();
     }
+  });
+
+  app.get("/api/generation-checkpoint/:generationId", (req, res) => {
+    cleanExpiredCheckpoints();
+    const checkpoint = loadCheckpoint(req.params.generationId);
+    if (!checkpoint) {
+      return res.status(404).json({ error: "Checkpoint not found or expired" });
+    }
+    return res.json({
+      generationId: checkpoint.generationId,
+      lastCompletedStep: checkpoint.lastCompletedStep,
+      canResume: checkpoint.canResume,
+      completeness: checkpoint.completeness,
+      environmentId: checkpoint.environmentId,
+      status: checkpoint.status,
+    });
+  });
+
+  app.post("/api/salvage-show", async (req, res) => {
+    const { generationId } = req.body as { generationId?: string };
+    if (!generationId) {
+      return res.status(400).json({ error: "Missing generationId" });
+    }
+
+    const geminiApiKey = getGeminiApiKey();
+    if (!geminiApiKey) {
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured.",
+      });
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const sendEvent = (event: Record<string, unknown>) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      const salvaged = await salvageFromCheckpoint(generationId, geminiApiKey, sendEvent);
+      sendEvent({ type: "status", status: salvaged ? "completed" : "failed" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      sendEvent({ type: "error", message });
+      sendEvent({ type: "status", status: "failed" });
+    } finally {
+      res.end();
+    }
+  });
+
+  app.post("/api/resume-show", async (req, res) => {
+    cleanExpiredCheckpoints();
+    const { generationId } = req.body as { generationId?: string };
+    if (!generationId) {
+      return res.status(400).json({ error: "Missing generationId" });
+    }
+
+    const checkpoint = loadCheckpoint(generationId);
+    if (!checkpoint) {
+      return res.status(404).json({ error: "Checkpoint not found or expired" });
+    }
+    if (!checkpoint.environmentId) {
+      return res.status(400).json({ error: "Checkpoint has no saved environment to resume" });
+    }
+    if (!checkpoint.canResume && checkpoint.lastCompletedStep >= 11) {
+      return res.status(400).json({ error: "This generation cannot be resumed; try salvage instead" });
+    }
+
+    const geminiApiKey = getGeminiApiKey();
+    if (!geminiApiKey) {
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured.",
+      });
+    }
+
+    const apiProbe = await probeGeminiApiAccess(geminiApiKey);
+    if (!apiProbe.ok) {
+      return res.status(503).json({ error: apiProbe.message });
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const sendEvent = (event: Record<string, unknown>) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const heartbeatInterval = setInterval(() => {
+      res.write(`:\n\n`);
+    }, 15000);
+
+    const abortController = new AbortController();
+    activeGenerations.set(generationId, abortController);
+
+    req.on("close", () => clearInterval(heartbeatInterval));
+
+    try {
+      sendEvent({
+        type: "info",
+        message: `Resuming from step ${checkpoint.lastCompletedStep + 1}...`,
+      });
+
+      const prompt = buildResumePrompt(checkpoint.showConfig, checkpoint.lastCompletedStep);
+      const result = await runGeneration({
+        generationId,
+        showConfig: checkpoint.showConfig,
+        prompt,
+        apiKey: geminiApiKey,
+        signal: abortController.signal,
+        sendEvent,
+        environmentId: checkpoint.environmentId,
+        previousInteractionId: checkpoint.interactionId,
+      });
+
+      sendEvent({ type: "status", status: result.showDelivered ? "completed" : "failed" });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        console.log(`[resume-show] Aborted: ${generationId}`);
+      } else {
+        console.error(`[resume-show] Error:`, error);
+        sendEvent({
+          type: "error",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    } finally {
+      clearInterval(heartbeatInterval);
+      activeGenerations.delete(generationId);
+      res.end();
+    }
+  });
+
+  app.get("/api/runs/:generationId", (req, res) => {
+    const manifest = loadRunManifest(req.params.generationId);
+    if (!manifest) {
+      return res.status(404).json({ error: "Run artifacts not found" });
+    }
+    return res.json(manifest);
+  });
+
+  app.get("/api/runs/:generationId/bundle", async (req, res) => {
+    const { generationId } = req.params;
+    const manifest = loadRunManifest(generationId);
+    if (!manifest) {
+      return res.status(404).send("Run artifacts not found");
+    }
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="run-${generationId}-artifacts.zip"`
+    );
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (err) => {
+      console.error("[runs/bundle] Archive error:", err);
+      if (!res.headersSent) {
+        res.status(500).end("Failed to create archive");
+      }
+    });
+    archive.pipe(res);
+
+    for (const file of manifest.files) {
+      const fullPath = resolveRunFilePath(generationId, file);
+      if (fullPath) {
+        archive.file(fullPath, { name: file.replace(/\\/g, "/") });
+      }
+    }
+
+    await archive.finalize();
+  });
+
+  app.get("/api/runs/:generationId/file", (req, res) => {
+    const { generationId } = req.params;
+    const relativePath = req.query.path;
+    if (typeof relativePath !== "string" || !relativePath.trim()) {
+      return res.status(400).json({ error: "Missing path query parameter" });
+    }
+
+    const fullPath = resolveRunFilePath(generationId, relativePath);
+    if (!fullPath) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    return res.download(fullPath);
   });
 
   app.get("/api/download-zip", async (req, res) => {

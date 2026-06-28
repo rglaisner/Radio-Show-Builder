@@ -355,3 +355,42 @@ def build_segment_instructions(config):
         lines.append("- Between segments, add a [hold] marker on its own line.")
 
     return "\n".join(lines)
+
+
+def build_branding_instructions(config):
+    """Station identity, topic, and tone rules for script generation."""
+    lines = []
+    topic = (config.get("topic") or "").strip()
+    tone_context = (config.get("toneContext") or "").strip()
+    features = config.get("features", {})
+
+    if topic:
+        lines.append(f"**SHOW TOPIC (mandatory):** {topic}")
+        lines.append("The entire script must stay focused on this topic.")
+
+    if tone_context:
+        lines.append(f"**USER TONE & BRANDING CONTEXT:** {tone_context}")
+        lines.append("Follow this context for station names, sponsor details, and mature themes when specified.")
+
+    lines.append(
+        "**NO AI REFERENCES:** Never mention AI, automation, bots, or 'AI Talk Radio' unless explicitly required in the user context above."
+    )
+
+    if features.get("stationId"):
+        lines.append(
+            "- Include a station ID bumper with the call letters/tagline from the user context (not generic placeholders)."
+        )
+
+    if features.get("mockSponsorRead"):
+        lines.append(
+            "- Include a sponsor read using the product and tagline from the user context when provided."
+        )
+        if tone_context:
+            lines.append(
+                "- Mature health/intimacy themes and fictional pharma sponsors are permitted when specified in user context."
+            )
+
+    if not lines:
+        return ""
+
+    return "**Branding & topic rules:**\n" + "\n".join(lines)

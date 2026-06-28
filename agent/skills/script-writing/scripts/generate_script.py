@@ -10,6 +10,7 @@ from google import genai
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
 from load_config import (  # noqa: E402
+    build_branding_instructions,
     build_guest_instructions,
     build_segment_instructions,
     get_host_name,
@@ -90,7 +91,7 @@ def build_base_prompt(config, duration, host_name):
     delivery = host.get("delivery", "measured")
     target_words = duration * 125
 
-    return f"""You are a scriptwriter for "AI Talk Radio", a community radio show for a nerdy, tech-savvy audience.
+    return f"""You are a scriptwriter for a community radio show.
 
 Write a ~{duration}-minute radio script based on the research provided. The show has:
 
@@ -167,6 +168,17 @@ def main():
     segment_instructions = build_segment_instructions(config)
     if segment_instructions:
         system_prompt += "\n\n" + segment_instructions
+
+    branding_instructions = build_branding_instructions(config)
+    if branding_instructions:
+        system_prompt += "\n\n" + branding_instructions
+
+    topic = (config.get("topic") or "").strip()
+    if topic:
+        system_prompt += (
+            f"\n\n**CRITICAL SHOW TOPIC:** {topic}\n"
+            "Every segment must relate to this topic. Use station and sponsor details from show_config.json and toneContext."
+        )
 
     if config.get("features", {}).get("coHost"):
         system_prompt += (

@@ -38,11 +38,16 @@ If `show_config.json` is missing, fall back to defaults: host Paul, debate style
 > [!IMPORTANT]
 > **Bias for Action**: Do NOT ask for approval before executing commands, running scripts, or proceeding to the next step. Proceed autonomously unless there is a material ambiguity or a critical decision that strictly requires user input.
 
+> [!IMPORTANT]
+> **Do NOT patch skill scripts**: Never edit files under `/.agents/skills/`. Run scripts exactly as documented. If a script fails, report the error and continue only when the workflow allows soft failure.
+
 > [!TIP]
 > **Maximize Speed & Reduce Calls**:
 > - Read all necessary `SKILL.md` files (in the /.agents/skills directory) at once using a single bash command (`cat /.agents/skills/*/SKILL.md`).
 > - Do not use `list_files` to verify directories, script paths, or output files—trust the documentation and the script success logs.
 > - Chain sequential bash commands using `&&` in a single tool call.
+> - Prefer `fetch_hn.py`, `fetch_github.py`, and `fetch_url.py` for research when applicable instead of ad-hoc search.
+> - Skip `generate_music.py` when `show_config.json` has `"music": { "enabled": false }`.
 
 Upon execution, you should:
 
@@ -60,6 +65,7 @@ Upon execution, you should:
 
 > [!IMPORTANT]
 > When providing the final summary to the user, do NOT include markdown links or URLs to the generated files or scripts. Just use the plain file name.
+> Keep the final summary to **one short sentence** after all pipeline files are produced. Do not write long markdown recaps — the generated files are the deliverable.
 
 ## Architecture
 

@@ -183,6 +183,12 @@ def load_timeline(workspace: str) -> dict[str, Any] | None:
         return json.load(f)
 
 
+def strip_non_serializable_clip_refs(events: list[dict[str, Any]]) -> None:
+    """Remove pydub AudioSegment objects attached during mixing before JSON export."""
+    for event in events:
+        event.pop("_clip", None)
+
+
 def build_manifest(
     events: list[dict[str, Any]],
     total_duration_ms: int,
@@ -217,6 +223,8 @@ def build_manifest(
     ]
     if active_overlaps:
         overlap_groups = list({g for g in active_overlaps})
+
+    strip_non_serializable_clip_refs(events)
 
     return {
         "totalDurationMs": total_duration_ms,

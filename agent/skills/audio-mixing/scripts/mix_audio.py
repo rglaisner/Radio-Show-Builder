@@ -15,6 +15,7 @@ from audio_timeline import (  # noqa: E402
     build_manifest,
     load_timeline,
     save_manifest,
+    strip_non_serializable_clip_refs,
 )
 from load_config import get_host_name, load_show_config  # noqa: E402
 
@@ -254,6 +255,7 @@ def mix_timeline(timeline, config, workspace):
         print("No background music — speech-only output.")
 
     master = master.fade_in(500).fade_out(2000)
+    strip_non_serializable_clip_refs(events)
     manifest = build_manifest(events, len(master))
     return master, manifest
 

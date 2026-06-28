@@ -12,18 +12,11 @@ from google import genai
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-from load_config import get_host_name, load_show_config  # noqa: E402
+from load_config import get_enabled_features, get_host_name, load_show_config  # noqa: E402
 
 INTERRUPT_RE = re.compile(r"\[interrupts\s+([^\]]+)\]", re.IGNORECASE)
 
-
-def count_overlap_tags(script_text):
-    interrupts = len(INTERRUPT_RE.findall(script_text))
-    under = len(re.findall(r"\[under\]", script_text, re.IGNORECASE))
-    reactions = len(re.findall(r"\[reaction\]", script_text, re.IGNORECASE))
-    return interrupts, under + reactions
-
-REVIEW_PROMPT = """You are a radio production director reviewing a script before TTS recording.
+REVIEW_PROMPT_BASE = """You are a radio production director reviewing a script before TTS recording.
 
 Analyze the script and return JSON with this structure:
 {
@@ -40,12 +33,51 @@ Check:
 4. No single non-host speaker exceeds 45% of lines (except interview style)
 5. No caller turn exceeds ~80 words
 6. Required segments present (intro, main content, closing)
-7. Content safety (no politics, profanity, etc.)
+7. Content safety (no politics, profanity, etc.) — see show-specific allowances below
 8. No fabricated facts beyond research
 9. Overlap tags (`[interrupts]`, `[under]`, `[reaction]`) are plausible for personas — shy callers should not have many sharp interjections
 10. `[interrupts SpeakerName]` references a speaker who spoke recently
 
 Return ONLY valid JSON."""
+
+
+def build_review_prompt(config):
+    """Tailor review rules to show_config (topic, tone, enabled features)."""
+    features = config.get("features", {})
+    tone_context = (config.get("toneContext") or "").strip()
+    topic = (config.get("topic") or "").strip()
+    enabled = get_enabled_features(features)
+
+    extra = []
+    if topic:
+        extra.append(f"- Show topic: {topic}")
+    if tone_context:
+        extra.append(f"- User tone/branding context: {tone_context}")
+    if enabled:
+        extra.append(f"- Enabled features: {', '.join(enabled)}")
+    if features.get("mockSponsorRead"):
+        extra.append(
+            "- Fictional sponsor reads and mature men's health themes are ALLOWED when aligned with user context."
+        )
+    if tone_context and any(
+        word in tone_context.lower()
+        for word in ("intimacy", "sponsor", "pharma", "mature", "bedroom", "vitality")
+    ):
+        extra.append(
+            "- Do NOT flag suggestive innuendo or ED/pharma sponsor content as a content safety violation."
+        )
+
+    if not extra:
+        return REVIEW_PROMPT_BASE
+
+    return REVIEW_PROMPT_BASE + "\n\n**Show-specific allowances:**\n" + "\n".join(extra)
+
+
+def count_overlap_tags(script_text):
+    interrupts = len(INTERRUPT_RE.findall(script_text))
+    under = len(re.findall(r"\[under\]", script_text, re.IGNORECASE))
+    reactions = len(re.findall(r"\[reaction\]", script_text, re.IGNORECASE))
+    return interrupts, under + reactions
 
 
 def count_speaker_lines(script_text):
@@ -64,6 +96,11 @@ def main():
     parser = argparse.ArgumentParser(description="Review radio script quality")
     parser.add_argument("--workspace", default="workspace")
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--auto-revise",
+        action="store_true",
+        help="Regenerate script once on failure (default: report only, do not overwrite script.md)",
+    )
     args = parser.parse_args()
 
     config = load_show_config(args.workspace, args.config)
@@ -73,7 +110,7 @@ def main():
     script_path = os.path.join(args.workspace, "data", "script.md")
     if not os.path.exists(script_path):
         print("ERROR: script.md not found")
-        return
+        sys.exit(1)
 
     with open(script_path, encoding="utf-8") as f:
         script = f.read()
@@ -82,8 +119,6 @@ def main():
 
     line_counts = count_speaker_lines(script)
     total_lines = sum(line_counts.values())
-    host_lines = line_counts.get(host_name, 0)
-    host_pct = (host_lines / total_lines * 100) if total_lines else 0
 
     guests_config = config.get("guests", {})
     guest_mode = guests_config.get("mode", "auto")
@@ -118,7 +153,7 @@ def main():
 
     realism = config.get("realism", {})
     if realism.get("enabled", True):
-        interrupts, backchannels = count_overlap_tags(script)
+        interrupts, _backchannels = count_overlap_tags(script)
         intensity = realism.get("intensity", "moderate")
         max_interrupts = {"subtle": 2, "moderate": 4, "lively": 8}.get(intensity, 4)
         if interrupts > max_interrupts:
@@ -128,6 +163,7 @@ def main():
         if style == "interview" and interrupts > 0:
             deterministic_issues.append("Interview style should not use guest [interrupts] tags")
 
+    review_prompt = build_review_prompt(config)
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 
     review_input = (
@@ -142,7 +178,7 @@ def main():
         interaction = client.interactions.create(
             model="gemini-3.5-flash",
             input=review_input,
-            system_instruction=REVIEW_PROMPT,
+            system_instruction=review_prompt,
         )
         review_text = interaction.steps[-1].content[0].text
         review_text = review_text.strip()
@@ -168,16 +204,19 @@ def main():
 
     if review.get("passed"):
         print("✅ Script review PASSED")
-    else:
-        print("⚠️ Script review FAILED:")
-        for issue in review.get("issues", []):
-            print(f"   - {issue}")
+        print(f"\nReview saved to {review_path}")
+        sys.exit(0)
 
+    print("⚠️ Script review FAILED:")
+    for issue in review.get("issues", []):
+        print(f"   - {issue}")
+
+    if args.auto_revise:
         revision_notes = review.get("revision_notes", "\n".join(review.get("issues", [])))
         script_gen = os.path.join(
             SCRIPT_DIR, "..", "..", "script-writing", "scripts", "generate_script.py"
         )
-        print("\nAttempting one automatic revision...")
+        print("\nAttempting one automatic revision (--auto-revise)...")
         subprocess.run(
             [
                 "python3",
@@ -191,8 +230,13 @@ def main():
             ],
             check=False,
         )
+    else:
+        print(
+            "\nScript left unchanged. Fix issues manually or re-run with --auto-revise to regenerate."
+        )
 
     print(f"\nReview saved to {review_path}")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

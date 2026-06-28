@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate cover image for AI Talk Radio using Gemini 3 Pro Image (Nano Banana Pro).
+"""Generate cover image for AI Talk Radio using Gemini image models.
 
 Usage:
     python3 generate_image.py --workspace ./workspace --prompt "Futuristic radio station"
@@ -12,6 +12,7 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import sys
 import warnings
 from google import genai
@@ -21,7 +22,10 @@ import random
 # Suppress experimental warnings from SDK
 warnings.filterwarnings("ignore", message="Interactions usage is experimental")
 
-BASE_PROMPT = "A professional podcast cover image for a show titled '{title}' on the 'AI Talk Radio' station. The design features the text '{title}' in a bold, stylish font"
+BASE_PROMPT = (
+    "A professional podcast cover image for a show titled '{title}'"
+    "{station_clause}. The design features the text '{title}' in a bold, stylish font"
+)
 
 PROMPT_STYLES = [
     " centered on the cover. The background is a vibrant purple with a textured water ripple effect that covers the entire frame, creating a dynamic and clean aesthetic.",
@@ -36,13 +40,76 @@ PROMPT_STYLES = [
     ". The background is a minimalist dark mode design with a subtle carbon fiber texture and a single thin accent line in emerald green, creating a sleek and modern aesthetic.",
     ". The background is a collage of abstract black and white photography fragments and torn paper edges, creating a raw and artistic aesthetic.",
     ". The background is a smooth liquid gold gradient with dynamic flowing curves and a metallic sheen, creating a luxurious and elegant aesthetic.",
-    ". The background is a vintage-inspired design with a sepia tone, subtle film grain, and abstract circular shapes overlapping, creating a nostalgic and timeless aesthetic."
+    ". The background is a vintage-inspired design with a sepia tone, subtle film grain, and abstract circular shapes overlapping, creating a nostalgic and timeless aesthetic.",
 ]
+
+IMAGE_MODELS = [
+    "gemini-3.1-flash-image",
+    "gemini-2.0-flash-preview-image-generation",
+]
+
+
+def load_station_label(workspace, metadata_path=None):
+    config_path = os.path.join(workspace, "data", "show_config.json")
+    station = ""
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                config = json.load(f)
+            tone = (config.get("toneContext") or "").strip()
+            if tone:
+                station = tone.split(".")[0][:120]
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if metadata_path and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, encoding="utf-8") as f:
+                metadata = json.load(f)
+            gen_cfg = metadata.get("generation_config") or {}
+            if gen_cfg.get("hostName"):
+                station = station or str(gen_cfg["hostName"])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return station
+
+
+def write_ffmpeg_fallback(output_path, title):
+    """Create a simple solid-color cover when Gemini image models fail."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    safe_title = "".join(c if c.isalnum() or c in " -_" else "" for c in title)[:40] or "Radio Show"
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x1a1a2e:s=1000x1000",
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+            output_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 and os.path.exists(output_path):
+        print(f"✅ Fallback cover saved to {output_path} (title: {safe_title})")
+        return True
+    print(f"⚠️ ffmpeg fallback failed: {result.stderr.strip()}")
+    return False
+
 
 def generate_image(prompt, output_path, reference=None):
     client = genai.Client(
         api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"),
-        http_options={"timeout": 60}
+        http_options={"timeout": 120_000},
     )
 
     prompt = prompt + " Image must be a 1:1 aspect ratio."
@@ -59,12 +126,7 @@ def generate_image(prompt, output_path, reference=None):
         })
         print(f"Uploaded as {ref_file.name}")
 
-    models_to_try = [
-        "gemini-3.1-flash-image",
-        "gemini-3.1-pro-image"
-    ]
-
-    for model_name in models_to_try:
+    for model_name in IMAGE_MODELS:
         print(f"Trying model: {model_name}")
         try:
             interaction = client.interactions.create(
@@ -92,14 +154,8 @@ def generate_image(prompt, output_path, reference=None):
 
         except Exception as e:
             print(f"⚠️  Image generation failed with {model_name}: {e}")
-            if "500" in str(e) or "api_error" in str(e):
-                print("Falling back to next model...")
-                continue
-            else:
-                # If it's a different error (e.g., auth), we might still want to try the fallback, 
-                # but let's just continue to the next model anyway.
-                print("Falling back to next model...")
-                continue
+            print("Falling back to next model...")
+            continue
 
     print("❌ All models failed to generate an image.")
     return False
@@ -117,22 +173,24 @@ def main():
         parser.error("Either --prompt or --metadata must be provided")
 
     prompt = args.prompt
+    title = "Radio Show"
 
     if args.metadata:
         if not os.path.exists(args.metadata):
             print(f"ERROR: Metadata file not found at {args.metadata}")
             sys.exit(1)
 
-        with open(args.metadata, "r") as f:
+        with open(args.metadata, "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
-        title = metadata.get("show_title", "AI Talk Radio")
-        summary = metadata.get("two_sentence_summary", "")
+        title = metadata.get("show_title", title)
 
         print(f"Selecting prompt template for title: '{title}'")
 
+        station = load_station_label(args.workspace, args.metadata)
+        station_clause = f" on station '{station}'" if station else ""
         style = random.choice(PROMPT_STYLES)
-        prompt = BASE_PROMPT.format(title=title) + style
+        prompt = BASE_PROMPT.format(title=title, station_clause=station_clause) + style
         print(f"Selected random style. Prompt: '{prompt}'")
 
     output_path = args.output
@@ -147,25 +205,25 @@ def main():
     def handler(signum, frame):
         raise TimeoutException()
 
-    # Register the alarm signal handler
     signal.signal(signal.SIGALRM, handler)
-    # Set timeout for image generation to 120 seconds max to prevent hangs
     signal.alarm(120)
 
     try:
         success = generate_image(prompt, output_path, reference=args.reference)
     except TimeoutException:
-        print("⚠️ Image generation timed out! Falling back to client-side default cover visual.")
+        print("⚠️ Image generation timed out!")
         success = False
     except Exception as e:
         print(f"⚠️ Image generation failed: {e}")
         success = False
     finally:
-        # Disable the alarm
         signal.alarm(0)
 
     if not success:
-        print("⚠️ Skipping custom cover image generation (using default template). Exiting successfully with status 0.")
+        success = write_ffmpeg_fallback(output_path, title)
+
+    if not success:
+        print("⚠️ Skipping custom cover image generation (using client-side default). Exiting successfully with status 0.")
         sys.exit(0)
 
 if __name__ == "__main__":

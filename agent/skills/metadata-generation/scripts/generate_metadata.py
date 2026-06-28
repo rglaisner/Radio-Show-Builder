@@ -238,9 +238,28 @@ def main():
     except Exception as e:
         print(f"Warning: Could not determine duration via pydub: {e}")
 
-    # Upload audio to Gemini Files API
-    print("Uploading audio to Gemini Files API...")
     today_date = datetime.now().strftime("%Y-%m-%d")
+    manifest = load_manifest(args.workspace)
+
+    if manifest and manifest.get("transcript"):
+        print("Timeline manifest found — building metadata from manifest (skipping audio upload).")
+        topic = (config.get("topic") or "").strip() or "Radio Show Episode"
+        json_data = {
+            "show_title": topic[:80],
+            "show_duration": duration_str,
+            "two_sentence_summary": f"A {duration_str} radio discussion about {topic[:120]}.",
+            "date_of_generation": today_date,
+            "timecoded_transcript": transcript_from_manifest(manifest),
+        }
+        json_data = enrich_metadata(json_data, config, args.workspace)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, indent=2)
+        print(f"✅ Metadata saved to {output_path}")
+        return
+
+    # Upload audio to Gemini Files API when manifest timecodes are unavailable
+    print("Uploading audio to Gemini Files API...")
     uploaded_file = None
     try:
         uploaded_file = client.files.upload(file=audio_path)

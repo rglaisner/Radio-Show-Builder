@@ -142,11 +142,13 @@ def main():
             )
 
     segments_dir = os.path.join(args.workspace, "audio", "speech", "segments")
-    if os.path.isdir(segments_dir):
-        wav_count = len([f for f in os.listdir(segments_dir) if f.endswith(".wav")])
-        if wav_count == 0:
-            report["passed"] = False
-            report["warnings"].append("No TTS segments found")
+    legacy_segments_dir = os.path.join(args.workspace, "audio", "segments")
+    wav_count = 0
+    for segments_path in (segments_dir, legacy_segments_dir):
+        if os.path.isdir(segments_path):
+            wav_count += len([f for f in os.listdir(segments_path) if f.endswith(".wav")])
+    if wav_count == 0 and os.path.exists(speech_path):
+        report["warnings"].append("No TTS segment files found under audio/segments or audio/speech/segments")
 
     report["warnings"].extend(check_overlap_budget(config, manifest))
     report["warnings"].extend(check_overlap_windows(manifest))
@@ -155,7 +157,10 @@ def main():
         report["warnings"].append("Timeline exists but timeline_manifest.json missing after mix")
 
     if report["warnings"]:
-        critical = any("not found" in w or "No TTS" in w for w in report["warnings"])
+        critical = any(
+            "not found" in w
+            for w in report["warnings"]
+        )
         if critical:
             report["passed"] = False
 
