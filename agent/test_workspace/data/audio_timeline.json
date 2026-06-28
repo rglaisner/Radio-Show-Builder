@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "realism": {
+    "enabled": true,
+    "intensity": "lively",
+    "allowGuestOverlap": true,
+    "ambientBeds": true
+  },
+  "style": "debate",
+  "events": [
+    {
+      "id": "amb_studio",
+      "type": "ambient",
+      "clipRef": "sfx/studio_room_tone.wav",
+      "startMs": 0,
+      "loop": true,
+      "volumeDb": -28,
+      "treatment": "studio"
+    },
+    {
+      "id": "amb_phone",
+      "type": "ambient",
+      "clipRef": "sfx/phone_hiss.wav",
+      "startMs": 0,
+      "loop": true,
+      "volumeDb": -32,
+      "treatment": "phone"
+    },
+    {
+      "id": "turn_000",
+      "type": "speech",
+      "speaker": "Paul",
+      "text": "Welcome to the show.",
+      "clipRef": "segments/turn_000.wav",
+      "startMs": 250,
+      "estimatedDurationMs": 1600,
+      "duckDuring": []
+    },
+    {
+      "id": "turn_001",
+      "type": "speech",
+      "speaker": "Guest1",
+      "text": "Let me talk about a different perspective on SQLite...",
+      "clipRef": "segments/turn_001.wav",
+      "startMs": 2100,
+      "estimatedDurationMs": 3600,
+      "duckDuring": [
+        "evt_002"
+      ],
+      "overlapGroup": "overlap_2"
+    },
+    {
+      "id": "evt_002",
+      "type": "interjection",
+      "speaker": "Guest2",
+      "text": "[indignantly] Oh obviously you cannot align with the rest of us on that.",
+      "clipRef": "segments/evt_002.wav",
+      "overlapOf": "turn_001",
+      "overlapRatio": 0.82,
+      "volumeDb": 0,
+      "duckDb": -6,
+      "overlapGroup": "overlap_2",
+      "ttsNote": "Deliver as a quick overlapping interjection; do not pause as if waiting for your turn.",
+      "duckDuring": []
+    },
+    {
+      "id": "evt_003",
+      "type": "backchannel",
+      "speaker": "Paul",
+      "text": "[quietly] mm-hmm",
+      "clipRef": "segments/evt_003.wav",
+      "overlapOf": "evt_002",
+      "overlapRatio": 0.35,
+      "volumeDb": -14,
+      "overlapGroup": "overlap_3",
+      "ttsNote": "Short backchannel while another speaker continues."
+    }
+  ]
+}

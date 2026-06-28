@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "topic": "SQLite debate",
+  "durationMinutes": 3,
+  "structure": {"style": "debate", "segments": []},
+  "features": {"phoneConnectSfx": true, "backgroundMusic": true},
+  "realism": {"enabled": true, "intensity": "lively", "allowGuestOverlap": true, "ambientBeds": true},
+  "host": {"name": "Paul", "voice": "Puck", "delivery": "measured"},
+  "guests": {"mode": "auto", "count": 2}
+}
