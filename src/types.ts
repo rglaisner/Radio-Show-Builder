@@ -1,7 +1,17 @@
 export interface RawTranscriptLine {
   timecode: string; // "MM:SS"
+  endTimecode?: string; // "MM:SS" — used for overlapping speech
   speaker: string;
   text: string;
+  overlapGroup?: string;
+}
+
+export interface TranscriptLine {
+  start: number;
+  end: number;
+  text: string;
+  speaker: string;
+  overlapGroup?: string;
 }
 
 export interface SpeakerInfo {
@@ -10,6 +20,7 @@ export interface SpeakerInfo {
   voice?: string;
   accent?: string;
   delivery?: string;
+  speakingStyle?: string;
   audioTreatment?: string;
 }
 
@@ -17,10 +28,10 @@ export interface GuestProfileSummary {
   name?: string;
   persona?: string;
   accent?: string;
-  delivery?: string;
+  speakingStyle?: string;
+  speakingStyleCustom?: string;
   location?: string;
   gender?: string;
-  voice?: string;
   audioTreatment?: string;
 }
 
@@ -53,13 +64,6 @@ export interface RawRadioShow {
   generation_config?: GenerationConfigSummary;
   features_enabled?: string[];
   quality_report?: QualityReportSummary;
-}
-
-export interface TranscriptLine {
-  start: number;
-  end: number;
-  text: string;
-  speaker: string;
 }
 
 export interface RadioShow {

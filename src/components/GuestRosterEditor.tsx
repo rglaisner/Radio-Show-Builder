@@ -2,11 +2,10 @@ import { useState } from 'react';
 import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react';
 import {
   GUEST_MODES,
-  GEMINI_VOICES,
-  HOST_DELIVERIES,
+  GUEST_SPEAKING_STYLE_VALUES,
+  GUEST_SPEAKING_STYLE_LABELS,
   GUEST_GENDERS,
   AUDIO_TREATMENTS,
-  VOICE_LABELS,
   AUDIO_TREATMENT_LABELS,
   GUEST_GENDER_LABELS,
   getGuestLimits,
@@ -16,8 +15,7 @@ import {
   type ShowStyle,
   type GuestMode,
   type GuestProfile,
-  type GeminiVoice,
-  type HostDelivery,
+  type GuestSpeakingStyle,
   type GuestGender,
   type AudioTreatment,
 } from '../showConfig';
@@ -35,34 +33,14 @@ function guestFieldId(index: number, field: string): string {
 export interface GuestRosterEditorProps {
   style: ShowStyle;
   guests: Partial<ShowConfig['guests']>;
-  hostVoice?: GeminiVoice;
   guestModeId?: string;
   guestCountId?: string;
   onChange: (guests: Partial<ShowConfig['guests']>) => void;
 }
 
-function getDuplicateVoices(
-  hostVoice: GeminiVoice | undefined,
-  roster: GuestProfile[] | undefined
-): GeminiVoice[] {
-  const counts = new Map<GeminiVoice, number>();
-  if (hostVoice) {
-    counts.set(hostVoice, 1);
-  }
-  for (const guest of roster ?? []) {
-    if (guest.voice) {
-      counts.set(guest.voice, (counts.get(guest.voice) ?? 0) + 1);
-    }
-  }
-  return [...counts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([voice]) => voice);
-}
-
 export function GuestRosterEditor({
   style,
   guests,
-  hostVoice,
   guestModeId,
   guestCountId,
   onChange,
@@ -74,7 +52,6 @@ export function GuestRosterEditor({
   const count = synced.count ?? limits.min;
   const [expandedCards, setExpandedCards] = useState<Record<number, boolean>>({ 0: true });
 
-  const duplicateVoices = getDuplicateVoices(hostVoice, roster);
   const showRoster = mode === 'guided' || mode === 'fixed';
 
   const handleModeChange = (nextMode: GuestMode) => {
@@ -173,12 +150,6 @@ export function GuestRosterEditor({
         )}
       </div>
 
-      {duplicateVoices.length > 0 && (
-        <p className="text-xs text-amber-400/90">
-          Duplicate voices detected ({duplicateVoices.join(', ')}). Guests may sound similar.
-        </p>
-      )}
-
       {showRoster && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -201,6 +172,7 @@ export function GuestRosterEditor({
             const cardTitle =
               guest.name?.trim() ||
               (mode === 'fixed' ? `Guest ${index + 1} (name required)` : `Archetype ${index + 1}`);
+            const speakingStyle = guest.speakingStyle ?? 'auto';
 
             return (
               <div
@@ -261,28 +233,48 @@ export function GuestRosterEditor({
                       />
                     </div>
                     <div className="space-y-2">
-                      <label htmlFor={guestFieldId(index, 'voice')} className={labelClass}>Voice</label>
+                      <label htmlFor={guestFieldId(index, 'speaking-style')} className={labelClass}>
+                        Speaking style
+                      </label>
                       <select
-                        id={guestFieldId(index, 'voice')}
-                        name={guestFieldId(index, 'voice')}
-                        value={guest.voice ?? ''}
-                        onChange={(e) =>
+                        id={guestFieldId(index, 'speaking-style')}
+                        name={guestFieldId(index, 'speaking-style')}
+                        value={speakingStyle}
+                        onChange={(e) => {
+                          const nextStyle = e.target.value as GuestSpeakingStyle;
                           updateGuest(index, {
-                            voice: e.target.value ? (e.target.value as GeminiVoice) : undefined,
-                          })
-                        }
+                            speakingStyle: nextStyle,
+                            ...(nextStyle !== 'custom' ? { speakingStyleCustom: undefined } : {}),
+                          });
+                        }}
                         className={selectClass}
                       >
-                        <option value="" className="bg-neutral-900">
-                          Auto-assign
-                        </option>
-                        {GEMINI_VOICES.map((v) => (
-                          <option key={v} value={v} className="bg-neutral-900">
-                            {VOICE_LABELS[v]}
+                        {GUEST_SPEAKING_STYLE_VALUES.map((styleValue) => (
+                          <option key={styleValue} value={styleValue} className="bg-neutral-900">
+                            {GUEST_SPEAKING_STYLE_LABELS[styleValue]}
                           </option>
                         ))}
                       </select>
                     </div>
+                    {speakingStyle === 'custom' && (
+                      <div className="space-y-2 md:col-span-2">
+                        <label htmlFor={guestFieldId(index, 'speaking-style-custom')} className={labelClass}>
+                          Custom speaking style
+                        </label>
+                        <input
+                          id={guestFieldId(index, 'speaking-style-custom')}
+                          name={guestFieldId(index, 'speaking-style-custom')}
+                          type="text"
+                          autoComplete="off"
+                          value={guest.speakingStyleCustom ?? ''}
+                          placeholder="e.g. rapid-fire skeptic with dry humor"
+                          onChange={(e) =>
+                            updateGuest(index, { speakingStyleCustom: e.target.value })
+                          }
+                          className={inputClass}
+                        />
+                      </div>
+                    )}
                     <div className="space-y-2 md:col-span-2">
                       <label htmlFor={guestFieldId(index, 'persona')} className={labelClass}>Persona</label>
                       <textarea
@@ -295,29 +287,6 @@ export function GuestRosterEditor({
                         onChange={(e) => updateGuest(index, { persona: e.target.value })}
                         className={`${inputClass} resize-none`}
                       />
-                    </div>
-                    <div className="space-y-2">
-                      <label htmlFor={guestFieldId(index, 'delivery')} className={labelClass}>Delivery</label>
-                      <select
-                        id={guestFieldId(index, 'delivery')}
-                        name={guestFieldId(index, 'delivery')}
-                        value={guest.delivery ?? ''}
-                        onChange={(e) =>
-                          updateGuest(index, {
-                            delivery: e.target.value ? (e.target.value as HostDelivery) : undefined,
-                          })
-                        }
-                        className={selectClass}
-                      >
-                        <option value="" className="bg-neutral-900">
-                          Default
-                        </option>
-                        {HOST_DELIVERIES.map((d) => (
-                          <option key={d} value={d} className="bg-neutral-900">
-                            {d}
-                          </option>
-                        ))}
-                      </select>
                     </div>
                     <div className="space-y-2">
                       <label htmlFor={guestFieldId(index, 'accent')} className={labelClass}>Accent</label>

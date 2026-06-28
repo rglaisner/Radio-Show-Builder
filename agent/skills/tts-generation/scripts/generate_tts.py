@@ -19,7 +19,16 @@ warnings.filterwarnings("ignore", message="Interactions usage is experimental")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
-from load_config import get_host_name, load_show_config  # noqa: E402
+from audio_timeline import SPEECH_EVENT_TYPES, load_timeline, save_timeline  # noqa: E402
+from load_config import (  # noqa: E402
+    build_guided_speaker_map,
+    get_guest_profile_for_speaker,
+    get_host_name,
+    guest_accent,
+    guest_delivery_style,
+    load_show_config,
+    pick_guest_voice,
+)
 
 FEMALE_VOICES = ["Kore"]
 MALE_VOICES = ["Charon", "Fenrir", "Puck"]
@@ -30,10 +39,10 @@ MAX_WORKERS = 8
 MARKER_LINES = {"[connect]", "[stinger]", "[hold]"}
 
 
-def build_profiles(config):
+def build_profiles(config, guided_map=None):
     host = config.get("host", {})
     host_name = get_host_name(config)
-    return {
+    profiles = {
         host_name: {
             "profile": (
                 f"# AUDIO PROFILE: {host_name}\n"
@@ -57,61 +66,73 @@ def build_profiles(config):
         },
     }
 
-
-def guest_accent(guest):
-    accent = guest.get("accent")
-    if accent:
-        return accent
-    location = guest.get("location")
-    if location:
-        return f"Based on location — {location}"
-    return "American English"
-
-
-def build_guest_profiles(config):
-    profiles = {}
     roster = config.get("guests", {}).get("roster", [])
     for guest in roster:
         name = guest.get("name")
-        if not name:
-            continue
-        delivery = guest.get("delivery", "conversational")
-        accent = guest_accent(guest)
-        profiles[name] = {
-            "profile": (
-                f"# AUDIO PROFILE: {name}\n"
-                f"## Role: Radio show guest\n"
-                f"## Persona: {guest.get('persona', 'Tech-savvy caller')}"
-            ),
-            "scene": f"## THE SCENE: {guest.get('location', 'Remote location')}",
-            "notes": (
-                f"### DIRECTOR'S NOTES\n"
-                f"Style: {delivery}.\n"
-                f"Pacing: Normal conversational pace.\n"
-                f"Accent: {accent}."
-            ),
-            "treatment": guest.get("audioTreatment", "phone"),
-        }
+        if name:
+            profiles[name] = _profile_from_guest(name, guest)
+
+    if guided_map:
+        for speaker_name, guest in guided_map.items():
+            if speaker_name not in profiles:
+                profiles[speaker_name] = _profile_from_guest(speaker_name, guest)
+
     return profiles
 
 
-def build_roster_lookups(config):
+def _profile_from_guest(name, guest):
+    delivery = guest_delivery_style(guest)
+    accent = guest_accent(guest)
+    return {
+        "profile": (
+            f"# AUDIO PROFILE: {name}\n"
+            f"## Role: Radio show guest\n"
+            f"## Persona: {guest.get('persona', 'Tech-savvy caller')}"
+        ),
+        "scene": f"## THE SCENE: {guest.get('location', 'Remote location')}",
+        "notes": (
+            f"### DIRECTOR'S NOTES\n"
+            f"Style: {delivery}.\n"
+            f"Pacing: Normal conversational pace.\n"
+            f"Accent: {accent}."
+        ),
+        "treatment": guest.get("audioTreatment", "phone"),
+    }
+
+
+def build_roster_lookups(config, host_voice, guided_map=None):
     """Build name-indexed voice, gender, and accent maps from guest roster."""
     voices = {}
     genders = {}
     accents = {}
-    for guest in config.get("guests", {}).get("roster", []):
-        name = guest.get("name")
-        if not name:
-            continue
-        if guest.get("voice"):
-            voices[name] = guest["voice"]
+    used_voices = {host_voice}
+    male_index = 0
+    female_index = 0
+
+    def assign_guest(name, guest):
+        nonlocal male_index, female_index
+        voice, male_index, female_index = pick_guest_voice(
+            guest, used_voices, male_index, female_index
+        )
+        used_voices.add(voice)
+        voices[name] = voice
         gender = guest.get("gender", "unspecified")
         if gender == "female":
             genders[name] = "Female"
         elif gender == "male":
             genders[name] = "Male"
         accents[name] = guest_accent(guest)
+
+    for guest in config.get("guests", {}).get("roster", []) or []:
+        name = guest.get("name")
+        if name:
+            assign_guest(name, guest)
+
+    if guided_map:
+        for speaker_name, guest in guided_map.items():
+            if speaker_name not in voices:
+                assign_guest(speaker_name, guest)
+
     return voices, genders, accents
 
 
@@ -140,9 +161,11 @@ def split_script_by_turns(script_text):
     return turns
 
 
-def generate_tts_single(client, speaker, text, output_path, voice, accent, profile_data):
+def generate_tts_single(client, speaker, text, output_path, voice, accent, profile_data, tts_note=""):
     notes = profile_data.get("notes", "")
     notes = re.sub(r"Accent:.*", f"Accent: {accent}", notes)
+    if tts_note:
+        notes += f"\n{tts_note}"
 
     prompt = f"""{profile_data.get('profile', '')}
 
@@ -210,37 +233,49 @@ def get_treatment(speaker, host_name, profiles, config):
     return "phone"
 
 
-def process_turn(client, turn_index, speaker, text, voice, accent, segments_dir, profiles, host_name, config, boost=False):
-    if speaker == "__marker__":
-        marker_path = os.path.join(segments_dir, f"turn_{turn_index:03d}_marker.txt")
-        with open(marker_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        return (turn_index, None)
-
-    raw_path = os.path.join(segments_dir, f"turn_{turn_index:03d}_raw.wav")
-    final_path = os.path.join(segments_dir, f"turn_{turn_index:03d}.wav")
+def process_event(
+    client,
+    event,
+    speaker,
+    text,
+    voice,
+    accent,
+    audio_dir,
+    profiles,
+    host_name,
+    config,
+    boost=False,
+    tts_note="",
+):
+    event_id = event["id"]
+    clip_ref = event.get("clipRef", f"segments/{event_id}.wav")
+    final_path = os.path.join(audio_dir, clip_ref.replace("/", os.sep))
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+    raw_path = final_path.replace(".wav", "_raw.wav")
 
     profile_data = profiles.get(speaker, profiles.get("default_caller", {}))
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            success = generate_tts_single(client, speaker, text, raw_path, voice, accent, profile_data)
+            success = generate_tts_single(
+                client, speaker, text, raw_path, voice, accent, profile_data, tts_note
+            )
             if success:
                 break
-            print(f"    [{turn_index}] Attempt {attempt}/{MAX_RETRIES}: no audio returned")
+            print(f"    [{event_id}] Attempt {attempt}/{MAX_RETRIES}: no audio returned")
         except Exception as e:
-            print(f"    [{turn_index}] Attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            print(f"    [{event_id}] Attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(2 * attempt)
     else:
-        print(f"    [{turn_index}] ✗ All {MAX_RETRIES} attempts failed, skipping")
-        return (turn_index, None)
+        print(f"    [{event_id}] ✗ All {MAX_RETRIES} attempts failed, skipping")
+        return (event_id, None)
 
     treatment = get_treatment(speaker, host_name, profiles, config)
 
     if treatment == "studio":
-        os.rename(raw_path, final_path)
-        print(f"    [{turn_index}] ✓ {speaker} ({voice}) clean studio")
+        os.replace(raw_path, final_path)
+        print(f"    [{event_id}] ✓ {speaker} ({voice}) clean studio")
     else:
         try:
             apply_telephone_filter(
@@ -249,12 +284,100 @@ def process_turn(client, turn_index, speaker, text, voice, accent, segments_dir,
                 boost=boost,
                 field=(treatment == "field"),
             )
-            print(f"    [{turn_index}] ✓ {speaker} ({voice}) + {treatment} filter")
+            os.remove(raw_path)
+            print(f"    [{event_id}] ✓ {speaker} ({voice}) + {treatment} filter")
         except Exception:
-            os.rename(raw_path, final_path)
-            print(f"    [{turn_index}] ✓ {speaker} ({voice}) (filter failed, using raw)")
+            os.replace(raw_path, final_path)
+            print(f"    [{event_id}] ✓ {speaker} ({voice}) (filter failed, using raw)")
 
-    return (turn_index, final_path)
+    return (event_id, final_path)
+
+
+def assign_voice_for_speaker(
+    speaker,
+    text,
+    host_name,
+    host_voice,
+    assigned_voices,
+    assigned_accents,
+    roster_voices,
+    roster_genders,
+    roster_accents,
+    config,
+    guided_map,
+    male_index,
+    female_index,
+):
+    gender = roster_genders.get(speaker, "Male")
+    if "[Female]" in text:
+        gender = "Female"
+        text = text.replace("[Female]", "").strip()
+    elif "[Male]" in text:
+        gender = "Male"
+        text = text.replace("[Male]", "").strip()
+
+    accent = roster_accents.get(speaker, "American English")
+    accent_match = re.search(r"\[Accent: ([^\]]+)\]", text)
+    if accent_match:
+        accent = accent_match.group(1)
+        text = re.sub(r"\[Accent: [^\]]+\]", "", text).strip()
+
+    boost = "[boost]" in text
+    if boost:
+        text = text.replace("[boost]", "").strip()
+
+    if speaker not in assigned_voices:
+        if speaker in roster_voices:
+            assigned_voices[speaker] = roster_voices[speaker]
+        elif speaker == host_name:
+            assigned_voices[speaker] = host_voice
+        else:
+            guest = get_guest_profile_for_speaker(speaker, config, guided_map)
+            if guest:
+                voice, male_index, female_index = pick_guest_voice(
+                    guest, set(assigned_voices.values()), male_index, female_index
+                )
+                assigned_voices[speaker] = voice
+            elif gender == "Female":
+                assigned_voices[speaker] = FEMALE_VOICES[female_index % len(FEMALE_VOICES)]
+                female_index += 1
+            else:
+                pool = [v for v in MALE_VOICES if v != host_voice or speaker == host_name]
+                assigned_voices[speaker] = pool[male_index % len(pool)]
+                male_index += 1
+
+    if speaker not in assigned_accents:
+        assigned_accents[speaker] = accent
+
+    return (
+        assigned_voices[speaker],
+        assigned_accents[speaker],
+        text,
+        boost,
+        male_index,
+        female_index,
+    )
+
+
+def get_speech_events(timeline, script_text):
+    if timeline:
+        return [
+            event for event in timeline.get("events", [])
+            if event.get("type") in SPEECH_EVENT_TYPES and event.get("text")
+        ]
+
+    events = []
+    for index, (speaker, text) in enumerate(split_script_by_turns(script_text)):
+        if speaker == "__marker__":
+            continue
+        events.append({
+            "id": f"turn_{index:03d}",
+            "type": "speech",
+            "speaker": speaker,
+            "text": text,
+            "clipRef": f"segments/turn_{index:03d}.wav",
+        })
+    return events
 
 
 def concatenate_wav_files(file_list, output_path, gap_ms=300):
@@ -283,128 +406,115 @@ def main():
     host_name = get_host_name(config)
     host_voice = config.get("host", {}).get("voice", "Puck")
 
-    profiles = build_profiles(config)
-    profiles.update(build_guest_profiles(config))
-
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
-
     script_path = os.path.join(args.workspace, "data", "script.md")
     with open(script_path, encoding="utf-8") as f:
         script = f.read()
 
-    turns = split_script_by_turns(script)
+    guided_map = build_guided_speaker_map(script, config)
+    if guided_map:
+        map_path = os.path.join(args.workspace, "data", "guided_speaker_map.json")
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {name: {"persona": g.get("persona"), "speakingStyle": g.get("speakingStyle")} for name, g in guided_map.items()},
+                f,
+                indent=2,
+            )
+
+    timeline = load_timeline(args.workspace)
+    speech_events = get_speech_events(timeline, script)
+
     print("=== AI Talk Radio: TTS Generation ===\n")
-    print(f"Found {len(turns)} turns (host: {host_name})")
+    print(f"Found {len(speech_events)} speech events (host: {host_name})")
     print(f"Generating in parallel with {args.workers} workers\n")
 
-    segments_dir = os.path.join(args.workspace, "audio", "speech", "segments")
+    audio_dir = os.path.join(args.workspace, "audio")
+    segments_dir = os.path.join(audio_dir, "speech", "segments")
     os.makedirs(segments_dir, exist_ok=True)
+
+    profiles = build_profiles(config, guided_map)
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "dummy-key"))
 
     assigned_voices = {host_name: host_voice}
     assigned_accents = {host_name: config.get("host", {}).get("accent", "British English")}
-    female_index = 0
     male_index = 0
-    prepared_turns = []
+    female_index = 0
 
-    roster_voices, roster_genders, roster_accents = build_roster_lookups(config)
+    roster_voices, roster_genders, roster_accents = build_roster_lookups(
+        config, host_voice, guided_map
+    )
 
-    for i, (speaker, text) in enumerate(turns):
-        if speaker == "__marker__":
-            prepared_turns.append((i, speaker, text, "", "", False))
-            continue
-
-        gender = roster_genders.get(speaker, "Male")
-        if "[Female]" in text:
-            gender = "Female"
-            text = text.replace("[Female]", "").strip()
-        elif "[Male]" in text:
-            gender = "Male"
-            text = text.replace("[Male]", "").strip()
-
-        accent = roster_accents.get(speaker, "American English")
-        accent_match = re.search(r"\[Accent: ([^\]]+)\]", text)
-        if accent_match:
-            accent = accent_match.group(1)
-            text = re.sub(r"\[Accent: [^\]]+\]", "", text).strip()
-
-        boost = "[boost]" in text
-        if boost:
-            text = text.replace("[boost]", "").strip()
-
-        if speaker not in assigned_voices:
-            if speaker in roster_voices:
-                assigned_voices[speaker] = roster_voices[speaker]
-            elif gender == "Female":
-                assigned_voices[speaker] = FEMALE_VOICES[female_index % len(FEMALE_VOICES)]
-                female_index += 1
-            else:
-                pool = [v for v in MALE_VOICES if v != host_voice or speaker == host_name]
-                assigned_voices[speaker] = pool[male_index % len(pool)]
-                male_index += 1
-
-        if speaker not in assigned_accents:
-            assigned_accents[speaker] = accent
-
-        voice = assigned_voices[speaker]
-        accent = assigned_accents[speaker]
-        prepared_turns.append((i, speaker, text, voice, accent, boost))
-        print(f"  [{i+1}/{len(turns)}] {speaker} ({voice}): {text[:60]}...")
-
-    markers = []
-    for i, (speaker, text) in enumerate(turns):
-        if speaker == "__marker__":
-            markers.append({"index": i, "marker": text})
-
-    markers_path = os.path.join(args.workspace, "data", "script_markers.json")
-    with open(markers_path, "w", encoding="utf-8") as f:
-        json.dump(markers, f)
+    prepared = []
+    for event in speech_events:
+        speaker = event.get("speaker", "")
+        text = event.get("text", "")
+        voice, accent, clean_text, boost, male_index, female_index = assign_voice_for_speaker(
+            speaker,
+            text,
+            host_name,
+            host_voice,
+            assigned_voices,
+            assigned_accents,
+            roster_voices,
+            roster_genders,
+            roster_accents,
+            config,
+            guided_map,
+            male_index,
+            female_index,
+        )
+        prepared.append((event, speaker, clean_text, voice, accent, boost))
+        print(f"  [{event['id']}] {speaker} ({voice}): {clean_text[:60]}...")
 
     print("\nStarting parallel generation...")
     results = {}
 
-    tts_turns = [(i, s, t, v, a, b) for i, s, t, v, a, b in prepared_turns if s != "__marker__"]
-
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
-                process_turn,
+                process_event,
                 client,
-                i,
+                event,
                 speaker,
                 text,
                 voice,
                 accent,
-                segments_dir,
+                audio_dir,
                 profiles,
                 host_name,
                 config,
                 boost,
-            ): i
-            for i, speaker, text, voice, accent, boost in tts_turns
+                event.get("ttsNote", ""),
+            ): event["id"]
+            for event, speaker, text, voice, accent, boost in prepared
         }
 
         for future in as_completed(futures):
-            turn_index, final_path = future.result()
-            results[turn_index] = final_path
+            event_id, final_path = future.result()
+            results[event_id] = final_path
 
-    segment_files = []
-    for i, (speaker, _text) in enumerate(turns):
-        if speaker == "__marker__":
-            continue
-        path = results.get(i)
-        if path is not None:
-            segment_files.append(path)
+    if timeline:
+        for event in timeline.get("events", []):
+            if event.get("type") in SPEECH_EVENT_TYPES:
+                path = results.get(event["id"])
+                event["clipGenerated"] = path is not None
+        save_timeline(args.workspace, timeline)
+
+    segment_files = [
+        results[event["id"]]
+        for event, *_rest in prepared
+        if results.get(event["id"]) is not None
+    ]
 
     output_path = os.path.join(args.workspace, "audio", "speech", "speech.wav")
-    concatenate_wav_files(segment_files, output_path)
+    concatenate_wav_files(segment_files, output_path, gap_ms=350)
 
     if os.path.exists(output_path):
         with wave.open(output_path, "rb") as wf:
             duration = wf.getnframes() / wf.getframerate()
-        failed = len(tts_turns) - len(segment_files)
+        failed = len(prepared) - len(segment_files)
         print("\n✅ TTS complete!")
         print(f"   Output: {output_path}")
-        print(f"   Duration: {duration:.1f}s | Segments: {len(segment_files)}/{len(tts_turns)}", end="")
+        print(f"   Duration: {duration:.1f}s | Segments: {len(segment_files)}/{len(prepared)}", end="")
         if failed:
             print(f" ({failed} failed)")
         else:

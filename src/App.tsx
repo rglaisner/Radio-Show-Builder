@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-  Play, Pause, Volume2, Info, List, ChevronDown, ChevronUp, Sparkles, Settings2, Clock, Radio,
+  Play, Pause, Volume2, Info, List, ChevronDown, ChevronUp, Settings2, Clock, Radio,
   TerminalSquare, CheckCircle2, Loader2, Download, Lock, Key, ShieldAlert, Check,
   HelpCircle, User, AlertCircle, RefreshCw, Trash2, ChevronLeft, Share2, Copy, ExternalLink, Globe
 } from 'lucide-react';
@@ -11,6 +11,8 @@ import firebaseConfig from '../firebase-applet-config.json';
 import { MOCK_SHOW, transformShow } from './data';
 import { Transcript } from './components/Transcript';
 import { GuestRosterEditor } from './components/GuestRosterEditor';
+import { ShowStartersPanel } from './components/ShowStartersPanel';
+import { QuickStartGuide, isQuickStartDismissed } from './components/QuickStartGuide';
 import { RainbowBackground } from './components/RainbowBackground';
 import { LoadingScreen } from './components/LoadingScreen';
 import { AuraTorquePulsarSpinner } from './components/AuraTorquePulsarSpinner';
@@ -29,23 +31,29 @@ import { z } from 'zod';
 import {
   buildShowConfig,
   TOPIC_MAX_LENGTH,
-  SHOW_PRESETS,
   SHOW_STYLES,
   GEMINI_VOICES,
   HOST_DELIVERIES,
   MUSIC_MOODS,
   RADIO_FEATURE_KEYS,
+  REALISM_INTENSITY_VALUES,
+  DEFAULT_REALISM,
   VOICE_LABELS,
   MOOD_MAPPING,
   formatShowConfigError,
   loadAdvancedSettings,
   saveAdvancedSettings,
+  applyStarterToOverrides,
+  getStarterById,
+  resolveGuestLimitStyle,
   type ShowConfig,
   type UiMood,
   type ShowStyle,
+  type StructureStyle,
   type GeminiVoice,
   type HostDelivery,
   type MusicMood,
+  type StarterCategory,
 } from './showConfig';
 
 const FORM_IDS = {
@@ -58,6 +66,7 @@ const FORM_IDS = {
   hostDelivery: 'host-delivery',
   hostAccent: 'host-accent',
   showStyle: 'show-style',
+  showStyleNotes: 'show-style-notes',
   guestMode: 'guest-mode',
   guestCount: 'guest-count',
   musicMood: 'music-mood',
@@ -195,12 +204,16 @@ export default function App() {
   const [targetDuration, setTargetDuration] = useState('3');
   const [targetMood, setTargetMood] = useState<UiMood>('Informative');
   const [selectedPresetId, setSelectedPresetId] = useState<string | undefined>(undefined);
+  const [selectedStarterId, setSelectedStarterId] = useState<string | undefined>(undefined);
+  const [showStyleManuallySet, setShowStyleManuallySet] = useState(false);
   const [advancedOverrides, setAdvancedOverrides] = useState<Partial<ShowConfig>>(() => loadAdvancedSettings() ?? {});
   const [configError, setConfigError] = useState<string | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<'tech' | 'culture' | 'news'>('tech');
+  const [starterCategory, setStarterCategory] = useState<StarterCategory | 'all'>('all');
+  const [quickStartOpen, setQuickStartOpen] = useState(() => !isQuickStartDismissed());
 
-  const effectiveShowStyle: ShowStyle =
-    advancedOverrides.structure?.style ?? MOOD_MAPPING[targetMood].suggestedStyle;
+  const effectiveShowStyle: ShowStyle = resolveGuestLimitStyle(
+    advancedOverrides.structure?.style ?? MOOD_MAPPING[targetMood].suggestedStyle
+  );
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -1065,17 +1078,62 @@ export default function App() {
     });
   };
 
-  const applyPreset = (presetId: string) => {
-    setSelectedPresetId(presetId);
-    const preset = SHOW_PRESETS.find((p) => p.id === presetId);
-    if (preset?.partial) {
-      setAdvancedOverrides((prev) => {
-        const next = { ...prev, ...preset.partial };
-        saveAdvancedSettings(next);
-        return next;
-      });
-      if (preset.partial.mood) setTargetMood(preset.partial.mood);
+  const syncMoodToShowStyle = (mood: UiMood) => {
+    const style = MOOD_MAPPING[mood].suggestedStyle;
+    updateAdvanced({
+      structure: { style, segments: advancedOverrides.structure?.segments ?? [] },
+    });
+  };
+
+  const handleMoodChange = (mood: UiMood) => {
+    setTargetMood(mood);
+    if (!showStyleManuallySet) {
+      syncMoodToShowStyle(mood);
     }
+  };
+
+  const handleShowStyleChange = (rawValue: string) => {
+    if (rawValue === '') {
+      setShowStyleManuallySet(false);
+      syncMoodToShowStyle(targetMood);
+      return;
+    }
+
+    setShowStyleManuallySet(true);
+    const style = rawValue as StructureStyle;
+    if (style === 'custom') {
+      updateAdvanced({
+        structure: {
+          style: 'custom',
+          styleNotes: advancedOverrides.structure?.styleNotes ?? '',
+          segments: advancedOverrides.structure?.segments ?? [],
+        },
+      });
+    } else {
+      updateAdvanced({
+        structure: { style, segments: advancedOverrides.structure?.segments ?? [] },
+      });
+    }
+  };
+
+  const applyShowStarter = (starterId: string) => {
+    const starter = getStarterById(starterId);
+    if (!starter) return;
+
+    const overrides = applyStarterToOverrides(starterId, targetMood);
+    setSelectedStarterId(starterId);
+    setSelectedPresetId(starter.presetId);
+    setShowStyleManuallySet(false);
+
+    if (starter.prompt) setPrompt(starter.prompt);
+    if (starter.durationMinutes) setTargetDuration(String(starter.durationMinutes));
+
+    const effectiveMood = starter.mood ?? overrides.mood ?? targetMood;
+    if (effectiveMood) setTargetMood(effectiveMood);
+
+    setAdvancedOverrides(overrides);
+    saveAdvancedSettings(overrides);
+    setConfigError(null);
   };
 
   const handleGenerate = async (e?: React.FormEvent, overridePrompt?: string, overrideDuration?: string, overrideMood?: string) => {
@@ -1702,57 +1760,6 @@ export default function App() {
   }
 
   if (view === 'home') {
-    const templateCategories = [
-      { id: 'tech', label: 'Tech & AI' },
-      { id: 'culture', label: 'Arts & Life' },
-      { id: 'news', label: 'News & Sports' }
-    ] as const;
-
-    const templates = {
-      tech: [
-        {
-          title: "Daily Hacker Bites",
-          desc: "Voice a digest of the top stories currently on Hacker News",
-          prompt: "Generate a radio show called Daily Hacker Bites based on top Hacker News stories.",
-          duration: "3"
-        },
-        {
-          title: "GitHub Roundtable",
-          desc: "Review the AlphaFold 3 repository and Google DeepMind's biology model",
-          prompt: "Generate a radio show with a roundtable concept, educating listeners about https://github.com/google-deepmind/alphafold3.",
-          duration: "3"
-        }
-      ],
-      culture: [
-        {
-          title: "Philosophy Café",
-          desc: "Host an atmospheric debate analyzing existentialism and humanity's future",
-          prompt: "Generate a thought-provoking discussion in a cozy café setting discussing existential questions.",
-          duration: "3"
-        },
-        {
-          title: "Cinematic Reviews",
-          desc: "Break down the visual style & legacy of iconic film directors",
-          prompt: "Generate a talk radio segment analyzing the distinct visual styles of movie directors.",
-          duration: "3"
-        }
-      ],
-      news: [
-        {
-          title: "Sports Tournament Debate",
-          desc: "Lively debate about preparations and predictions for a major tournament",
-          prompt: "Generate a lively sports debate about preparations for a major upcoming tournament.",
-          duration: "3"
-        },
-        {
-          title: "Fintech Briefing",
-          desc: "Explain decentralized finance developments and global stock market trends",
-          prompt: "Generate a radio segment providing an interactive briefing on fintech and global markets.",
-          duration: "3"
-        }
-      ]
-    };
-
     return (
       <div className="fixed inset-0 w-full h-full bg-black text-white overflow-hidden font-sans select-none flex flex-col">
         <RainbowBackground />
@@ -1834,6 +1841,15 @@ export default function App() {
                   >
                     AI agents
                   </a>
+                  <span className="text-white/25 mx-2">·</span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickStartOpen(true)}
+                    className="inline-flex items-center gap-1 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    How it works
+                  </button>
                 </p>
               </div>
 
@@ -1901,7 +1917,7 @@ export default function App() {
                             id={FORM_IDS.mood}
                             name={FORM_IDS.mood}
                             value={targetMood}
-                            onChange={(e) => setTargetMood(e.target.value as UiMood)}
+                            onChange={(e) => handleMoodChange(e.target.value as UiMood)}
                             className="bg-transparent border-none text-[11px] font-bold text-white/70 focus:outline-none focus:ring-0 cursor-pointer appearance-none uppercase tracking-wider pr-1"
                           >
                             <option value="Informative" className="bg-neutral-900 text-white">Informative</option>
@@ -2050,19 +2066,39 @@ export default function App() {
                                 id={FORM_IDS.showStyle}
                                 name={FORM_IDS.showStyle}
                                 value={advancedOverrides.structure?.style ?? ''}
-                                onChange={(e) => updateAdvanced({ structure: { style: e.target.value as ShowStyle, segments: [] } })}
+                                onChange={(e) => handleShowStyleChange(e.target.value)}
                                 className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
                               >
-                                <option value="" className="bg-neutral-900">From mood / preset</option>
+                                <option value="" className="bg-neutral-900">Auto (from mood / starter)</option>
                                 {SHOW_STYLES.map((s) => (
                                   <option key={s} value={s} className="bg-neutral-900">{s}</option>
                                 ))}
+                                <option value="custom" className="bg-neutral-900">Custom…</option>
                               </select>
+                              {advancedOverrides.structure?.style === 'custom' && (
+                                <input
+                                  id={FORM_IDS.showStyleNotes}
+                                  name={FORM_IDS.showStyleNotes}
+                                  type="text"
+                                  autoComplete="off"
+                                  placeholder="Describe your show format (e.g. documentary-style panel)"
+                                  value={advancedOverrides.structure?.styleNotes ?? ''}
+                                  onChange={(e) =>
+                                    updateAdvanced({
+                                      structure: {
+                                        style: 'custom',
+                                        styleNotes: e.target.value,
+                                        segments: advancedOverrides.structure?.segments ?? [],
+                                      },
+                                    })
+                                  }
+                                  className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-io-blue"
+                                />
+                              )}
                             </div>
                             <GuestRosterEditor
                               style={effectiveShowStyle}
                               guests={advancedOverrides.guests ?? {}}
-                              hostVoice={advancedOverrides.host?.voice}
                               guestModeId={FORM_IDS.guestMode}
                               guestCountId={FORM_IDS.guestCount}
                               onChange={(guests) => updateAdvanced({ guests: guests as ShowConfig['guests'] })}
@@ -2092,6 +2128,86 @@ export default function App() {
                           )}
 
                           <div className="space-y-2">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-white/40">Audio realism</span>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-lg border border-white/10 bg-white/[0.02]">
+                              <label htmlFor="realism-enabled" className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+                                <input
+                                  id="realism-enabled"
+                                  name="realism-enabled"
+                                  type="checkbox"
+                                  checked={advancedOverrides.realism?.enabled ?? DEFAULT_REALISM.enabled}
+                                  onChange={(e) => updateAdvanced({
+                                    realism: {
+                                      ...DEFAULT_REALISM,
+                                      ...advancedOverrides.realism,
+                                      enabled: e.target.checked,
+                                    },
+                                  })}
+                                  className="rounded border-white/20"
+                                />
+                                <span>Natural overlaps & ambient beds</span>
+                              </label>
+                              <div className="space-y-1">
+                                <label htmlFor="realism-intensity" className="text-[10px] uppercase tracking-wider text-white/40">Overlap intensity</label>
+                                <select
+                                  id="realism-intensity"
+                                  name="realism-intensity"
+                                  value={advancedOverrides.realism?.intensity ?? DEFAULT_REALISM.intensity}
+                                  disabled={!(advancedOverrides.realism?.enabled ?? DEFAULT_REALISM.enabled)}
+                                  onChange={(e) => updateAdvanced({
+                                    realism: {
+                                      ...DEFAULT_REALISM,
+                                      ...advancedOverrides.realism,
+                                      intensity: e.target.value as ShowConfig['realism']['intensity'],
+                                    },
+                                  })}
+                                  className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none disabled:opacity-40"
+                                >
+                                  {REALISM_INTENSITY_VALUES.map((level) => (
+                                    <option key={level} value={level} className="bg-neutral-900 capitalize">{level}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <label htmlFor="realism-guest-overlap" className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+                                <input
+                                  id="realism-guest-overlap"
+                                  name="realism-guest-overlap"
+                                  type="checkbox"
+                                  checked={advancedOverrides.realism?.allowGuestOverlap ?? DEFAULT_REALISM.allowGuestOverlap}
+                                  disabled={!(advancedOverrides.realism?.enabled ?? DEFAULT_REALISM.enabled)}
+                                  onChange={(e) => updateAdvanced({
+                                    realism: {
+                                      ...DEFAULT_REALISM,
+                                      ...advancedOverrides.realism,
+                                      allowGuestOverlap: e.target.checked,
+                                    },
+                                  })}
+                                  className="rounded border-white/20"
+                                />
+                                <span>Guest barge-ins</span>
+                              </label>
+                              <label htmlFor="realism-ambient" className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+                                <input
+                                  id="realism-ambient"
+                                  name="realism-ambient"
+                                  type="checkbox"
+                                  checked={advancedOverrides.realism?.ambientBeds ?? DEFAULT_REALISM.ambientBeds}
+                                  disabled={!(advancedOverrides.realism?.enabled ?? DEFAULT_REALISM.enabled)}
+                                  onChange={(e) => updateAdvanced({
+                                    realism: {
+                                      ...DEFAULT_REALISM,
+                                      ...advancedOverrides.realism,
+                                      ambientBeds: e.target.checked,
+                                    },
+                                  })}
+                                  className="rounded border-white/20"
+                                />
+                                <span>Room tone & phone hiss</span>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-white/40">Radio features</span>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                               {RADIO_FEATURE_KEYS.map((key) => (
@@ -2115,32 +2231,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Show format presets */}
-                <div className="bg-[#0e0e0e]/50 border border-white/5 rounded-[1.5rem] p-5 flex flex-col gap-4 backdrop-blur-md">
-                  <div className="flex items-center gap-2">
-                    <Radio className="w-3.5 h-3.5 text-white/40" />
-                    <span className="text-[10px] font-bold tracking-[0.2em] uppercase text-white/40">Show format presets</span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {SHOW_PRESETS.map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => applyPreset(preset.id)}
-                        className={`text-left p-4 rounded-xl border transition-all cursor-pointer ${
-                          selectedPresetId === preset.id
-                            ? 'bg-white/10 border-io-blue/50 ring-1 ring-io-blue/30'
-                            : 'bg-white/[0.02] border-white/5 hover:border-white/10 hover:bg-white/[0.04]'
-                        }`}
-                      >
-                        <span className="text-sm font-bold text-white/90">{preset.name}</span>
-                        <p className="text-xs text-white/50 mt-1 leading-relaxed">{preset.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Sub-generation time & privacy guideline */}
+                {/* Timing / privacy guideline */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 text-[11px] text-white/30">
                   <div className="flex items-center gap-2 font-medium">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#fbbc04]/80 animate-pulse shadow-[0_0_6px_rgba(251,188,4,0.5)]" />
@@ -2152,54 +2243,17 @@ export default function App() {
                 </div>
               </form>
 
-              {/* Dynamic Categories & Templates Panel (Perplexity-style "Try Computer") */}
-              <div className="bg-[#0e0e0e]/50 border border-white/5 rounded-[1.5rem] p-5 flex flex-col gap-4 backdrop-blur-md">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-4">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-3.5 h-3.5 text-white/40" />
-                    <span className="text-[10px] font-bold tracking-[0.2em] uppercase text-white/40">Try a template</span>
-                  </div>
-                  <div className="flex gap-1 p-0.5 bg-white/[0.03] border border-white/5 rounded-full shrink-0">
-                    {templateCategories.map((cat) => (
-                      <button
-                        key={cat.id}
-                        type="button"
-                        onClick={() => setSelectedCategory(cat.id)}
-                        className={`px-3.5 py-1.5 rounded-full text-[10px] font-bold transition-all uppercase tracking-wider cursor-pointer ${selectedCategory === cat.id ? 'bg-white text-black font-extrabold shadow-sm' : 'text-white/55 hover:text-white/85'}`}
-                      >
-                        {cat.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                  {templates[selectedCategory].map((tmpl) => (
-                    <button
-                      key={tmpl.title}
-                      type="button"
-                      onClick={() => {
-                        if (quota && quota.remaining <= 0) return;
-                        setPrompt(tmpl.prompt);
-                        setTargetDuration(tmpl.duration);
-                        document.querySelector('form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      }}
-                      disabled={isGenerating || (quota && quota.remaining <= 0)}
-                      className="text-left p-4 rounded-xl bg-white/[0.02] border border-white/5 hover:border-white/10 hover:bg-white/[0.04] active:bg-white/[0.06] transition-all duration-200 group relative overflow-hidden cursor-pointer"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-bold text-white/90 group-hover:text-white transition-colors">
-                          {tmpl.title}
-                        </span>
-                        <span className="text-xs text-white/30 group-hover:text-white/70 transition-transform group-hover:translate-x-0.5 font-bold">→</span>
-                      </div>
-                      <p className="text-xs text-white/50 mt-1 font-medium leading-relaxed group-hover:text-white/75 transition-colors">
-                        {tmpl.desc}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <ShowStartersPanel
+                selectedStarterId={selectedStarterId}
+                selectedCategory={starterCategory}
+                onCategoryChange={setStarterCategory}
+                onSelectStarter={(starterId) => {
+                  if (quota && quota.remaining <= 0) return;
+                  applyShowStarter(starterId);
+                  document.querySelector('form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+                disabled={isGenerating || Boolean(quota && quota.remaining <= 0)}
+              />
             </section>
 
             {/* Library */}
@@ -2282,6 +2336,8 @@ export default function App() {
           </section>
           </div>
         </div>
+
+        <QuickStartGuide open={quickStartOpen} onClose={() => setQuickStartOpen(false)} />
       </div>
     );
   }
@@ -2586,7 +2642,7 @@ export default function App() {
                 <span>Disclaimer</span>
               </div>
               <p className="text-[10px] md:text-[11px] leading-relaxed text-white/60 font-medium font-sans">
-                This simulated broadcast is user-generated content created using AI Studio. All hosts, voices and scripts are completely synthetic and fictional. It is not produced by or represent Google's opinions.
+                This simulated broadcast is user-generated content created using AI. All hosts, voices and scripts are completely synthetic and fictional.
               </p>
             </div>
 

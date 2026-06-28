@@ -1,5 +1,5 @@
 import type { ShowConfig } from "../../src/showConfig.ts";
-import { getEnabledFeatures } from "../../src/showConfig.ts";
+import { getEnabledFeatures, getGuestSpeakingStyleLabel } from "../../src/showConfig.ts";
 
 function formatRosterSummary(config: ShowConfig): string {
   const roster = config.guests.roster;
@@ -11,8 +11,8 @@ function formatRosterSummary(config: ShowConfig): string {
     if (guest.persona) parts.push(guest.persona);
     if (guest.location) parts.push(`from ${guest.location}`);
     if (guest.accent) parts.push(`accent: ${guest.accent}`);
-    if (guest.delivery) parts.push(`delivery: ${guest.delivery}`);
-    if (guest.voice) parts.push(`voice: ${guest.voice}`);
+    const speakingStyle = getGuestSpeakingStyleLabel(guest);
+    if (speakingStyle) parts.push(`speaking style: ${speakingStyle}`);
     return parts.join(" — ");
   });
 
@@ -40,7 +40,7 @@ CRITICAL: Read and follow workspace/data/show_config.json for ALL customization.
 
 Show parameters:
 - Target duration: ${config.durationMinutes} minutes
-- Show style: ${config.structure.style}
+- Show style: ${config.structure.style === "custom" ? config.structure.styleNotes : config.structure.style}
 - Host: ${config.host.name} (${config.host.delivery} delivery, voice: ${config.host.voice})
 - Guests: ${guestSummary} (mode: ${config.guests.mode})${rosterSummary}
 - Music mood: ${config.music.mood} (enabled: ${config.music.enabled})

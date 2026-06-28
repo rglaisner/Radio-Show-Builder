@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
     },
     "music": {"mood": "tech", "enabled": True},
     "toneContext": "",
+    "realism": {
+        "enabled": True,
+        "intensity": "moderate",
+        "allowGuestOverlap": True,
+        "ambientBeds": True,
+    },
 }
 
 
@@ -71,6 +77,16 @@ def get_host_name(config):
     return config.get("host", {}).get("name", "Paul")
 
 
+def guest_accent(guest):
+    accent = guest.get("accent")
+    if accent:
+        return accent
+    location = guest.get("location")
+    if location:
+        return f"Based on location — {location}"
+    return "American English"
+
+
 def get_enabled_segments(config):
     segments = config.get("structure", {}).get("segments", [])
     return [s for s in segments if s.get("enabled", True)]
@@ -81,6 +97,104 @@ def get_enabled_features(config):
     return [key for key, enabled in features.items() if enabled is True and key != "signOffPhrase"]
 
 
+SPEAKING_STYLE_LABELS = {
+    "auto": "Auto-assign",
+    "warm-measured": "Warm & measured",
+    "warm-energetic": "Warm & energetic",
+    "clear-conversational": "Clear & conversational",
+    "unhurried": "Unhurried & relaxed",
+    "high-energy": "High-energy & upbeat",
+    "soft-spoken": "Soft-spoken & thoughtful",
+    "assertive": "Assertive & direct",
+    "custom": "Custom",
+}
+
+SPEAKING_STYLE_RESOLUTION = {
+    "warm-measured": {"delivery": "measured", "voice_hint": "warm"},
+    "warm-energetic": {"delivery": "energetic", "voice_hint": "warm"},
+    "clear-conversational": {"delivery": "measured", "voice_hint": "clear"},
+    "unhurried": {"delivery": "late-night", "voice_hint": "lowRegister"},
+    "high-energy": {"delivery": "hype", "voice_hint": "bold"},
+    "soft-spoken": {"delivery": "measured", "voice_hint": "soft"},
+    "assertive": {"delivery": "energetic", "voice_hint": "authoritative"},
+}
+
+VOICE_HINT_PREFERENCES = {
+    "warm": {"female": "Kore", "male": "Puck"},
+    "clear": {"female": "Kore", "male": "Puck"},
+    "lowRegister": {"female": "Kore", "male": "Charon"},
+    "bold": {"female": "Kore", "male": "Fenrir"},
+    "soft": {"female": "Kore", "male": "Puck"},
+    "authoritative": {"female": "Kore", "male": "Charon"},
+}
+
+
+def resolve_guest_speaking_style(guest):
+    """Resolve speaking style preset into delivery, voice hint, or custom text."""
+    style = guest.get("speakingStyle", "auto")
+    if style == "auto":
+        legacy_delivery = guest.get("delivery")
+        if legacy_delivery:
+            return {"delivery": legacy_delivery}
+        return {}
+    if style == "custom":
+        custom_text = (guest.get("speakingStyleCustom") or "").strip()
+        return {"custom_text": custom_text} if custom_text else {}
+    resolved = SPEAKING_STYLE_RESOLUTION.get(style)
+    if not resolved:
+        return {}
+    return {
+        "delivery": resolved["delivery"],
+        "voice_hint": resolved["voice_hint"],
+    }
+
+
+def get_guest_speaking_style_label(guest):
+    """Human-readable speaking style for script/metadata output."""
+    style = guest.get("speakingStyle", "auto")
+    if style == "auto":
+        legacy_delivery = guest.get("delivery")
+        if legacy_delivery:
+            return f"{legacy_delivery} delivery"
+        return None
+    if style == "custom":
+        custom_text = (guest.get("speakingStyleCustom") or "").strip()
+        return custom_text or SPEAKING_STYLE_LABELS["custom"]
+    return SPEAKING_STYLE_LABELS.get(style)
+
+
+def guest_delivery_style(guest):
+    """Delivery/custom style string for TTS director notes."""
+    resolved = resolve_guest_speaking_style(guest)
+    if resolved.get("custom_text"):
+        return resolved["custom_text"]
+    if resolved.get("delivery"):
+        return resolved["delivery"]
+    return "conversational"
+
+
+def pick_guest_voice(guest, used_voices, male_index, female_index):
+    """Pick a Gemini voice based on gender and speaking-style hint."""
+    resolved = resolve_guest_speaking_style(guest)
+    gender = guest.get("gender", "unspecified")
+    voice_hint = resolved.get("voice_hint")
+
+    if gender == "female":
+        preferred = VOICE_HINT_PREFERENCES.get(voice_hint, {}).get("female") if voice_hint else None
+        pool = ["Kore"]
+        voice = preferred if preferred and preferred not in used_voices else pool[female_index % len(pool)]
+        return voice, male_index, female_index + 1
+
+    preferred = VOICE_HINT_PREFERENCES.get(voice_hint, {}).get("male") if voice_hint else None
+    male_voices = ["Puck", "Charon", "Fenrir"]
+    male_pool = [v for v in male_voices if v not in used_voices]
+    if preferred and preferred in male_pool:
+        voice = preferred
+    else:
+        voice = male_pool[male_index % len(male_pool)] if male_pool else male_voices[male_index % len(male_voices)]
+    return voice, male_index + 1, female_index
+
+
 def _format_guest_archetype(guest, index):
     """Format a single guest/archetype line for script instructions."""
     label = guest.get("name") or f"Archetype {index + 1}"
@@ -88,7 +202,7 @@ def _format_guest_archetype(guest, index):
     location = guest.get("location", "remote location")
     gender = guest.get("gender", "unspecified")
     accent = guest.get("accent")
-    delivery = guest.get("delivery")
+    speaking_style = get_guest_speaking_style_label(guest)
     treatment = guest.get("audioTreatment", "phone")
 
     parts = [f"- {label}: {persona}, calling from {location}"]
@@ -96,8 +210,8 @@ def _format_guest_archetype(guest, index):
         parts.append(f"gender: {gender}")
     if accent:
         parts.append(f"accent: {accent}")
-    if delivery:
-        parts.append(f"delivery: {delivery}")
+    if speaking_style:
+        parts.append(f"speaking style: {speaking_style}")
     if treatment != "phone":
         parts.append(f"audio: {treatment}")
     return ", ".join(parts)
@@ -109,6 +223,47 @@ def _gender_tag(gender):
     if gender == "male":
         return "[Male]"
     return ""
+
+
+def build_guided_speaker_map(script_text, config):
+    """Map script guest names to roster archetypes by order of first appearance."""
+    host_name = get_host_name(config)
+    guests_config = config.get("guests", {})
+    if guests_config.get("mode") != "guided":
+        return {}
+
+    roster = guests_config.get("roster") or []
+    if not roster:
+        return {}
+
+    seen = []
+    for line in script_text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or line in ("[connect]", "[stinger]", "[hold]"):
+            continue
+        if ":" not in line:
+            continue
+        speaker = line.split(":")[0].strip()
+        if speaker == host_name or speaker in seen:
+            continue
+        seen.append(speaker)
+
+    mapping = {}
+    for index, speaker_name in enumerate(seen):
+        if index < len(roster):
+            mapping[speaker_name] = roster[index]
+    return mapping
+
+
+def get_guest_profile_for_speaker(speaker, config, guided_map=None):
+    """Resolve guest profile for a script speaker name."""
+    roster = config.get("guests", {}).get("roster") or []
+    for guest in roster:
+        if guest.get("name") == speaker:
+            return guest
+    if guided_map and speaker in guided_map:
+        return guided_map[speaker]
+    return None
 
 
 def build_guest_instructions(config):
@@ -123,11 +278,8 @@ def build_guest_instructions(config):
         ]
         for i, guest in enumerate(roster):
             name = guest.get("name") or "Guest"
-            persona = guest.get("persona", "tech-savvy caller")
-            location = guest.get("location", "remote location")
             gender = guest.get("gender", "unspecified")
-            accent = guest.get("accent") or f"based on {location}"
-            delivery = guest.get("delivery", "conversational")
+            accent = guest.get("accent") or f"based on {guest.get('location', 'remote location')}"
             gender_tag = _gender_tag(gender)
             accent_tag = f"[Accent: {accent}]" if accent else ""
             lines.append(_format_guest_archetype(guest, i))

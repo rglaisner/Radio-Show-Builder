@@ -22,9 +22,29 @@ from pydub import AudioSegment
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "..", "..", "show-production", "scripts"))
-from load_config import get_enabled_features, get_host_name, load_show_config  # noqa: E402
+from load_config import get_enabled_features, get_guest_speaking_style_label, get_host_name, load_show_config  # noqa: E402
+from audio_timeline import load_manifest, ms_to_timecode  # noqa: E402
 
-def make_fallback_metadata(transcript_text, duration_str, today_date, output_path):
+
+def transcript_from_manifest(manifest):
+    """Build timecoded transcript entries from resolved timeline manifest."""
+    entries = []
+    for item in manifest.get("transcript", []):
+        start_ms = item.get("startMs", 0)
+        end_ms = item.get("endMs", start_ms + 1000)
+        entry = {
+            "timecode": ms_to_timecode(start_ms),
+            "endTimecode": ms_to_timecode(end_ms),
+            "speaker": item.get("speaker", ""),
+            "text": item.get("text", ""),
+        }
+        if item.get("overlapGroup"):
+            entry["overlapGroup"] = item["overlapGroup"]
+        entries.append(entry)
+    return entries
+
+
+def make_fallback_metadata(transcript_text, duration_str, today_date, output_path, workspace=None):
     print("Creating a premium local fallback metadata file...")
     turns = []
     lines = transcript_text.strip().split('\n')
@@ -59,6 +79,11 @@ def make_fallback_metadata(transcript_text, duration_str, today_date, output_pat
         "date_of_generation": today_date,
         "timecoded_transcript": turns
     }
+
+    if workspace:
+        manifest = load_manifest(workspace)
+        if manifest and manifest.get("transcript"):
+            fallback_data["timecoded_transcript"] = transcript_from_manifest(manifest)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
@@ -91,10 +116,10 @@ def sanitize_guest_profiles(roster):
             "name": guest.get("name"),
             "persona": guest.get("persona"),
             "accent": guest.get("accent"),
-            "delivery": guest.get("delivery"),
+            "speakingStyle": guest.get("speakingStyle"),
+            "speakingStyleCustom": guest.get("speakingStyleCustom"),
             "location": guest.get("location"),
             "gender": guest.get("gender"),
-            "voice": guest.get("voice"),
             "audioTreatment": guest.get("audioTreatment"),
         })
     return profiles
@@ -134,12 +159,12 @@ def enrich_metadata(json_data, config, workspace):
 
     for name in guest_names:
         roster_guest = roster_by_name.get(name, {})
+        speaking_style = get_guest_speaking_style_label(roster_guest)
         speakers.append({
             "name": name,
             "role": "guest",
-            "voice": roster_guest.get("voice"),
             "accent": roster_guest.get("accent"),
-            "delivery": roster_guest.get("delivery"),
+            "speakingStyle": speaking_style,
             "audioTreatment": roster_guest.get("audioTreatment", "phone"),
         })
 
@@ -152,6 +177,7 @@ def enrich_metadata(json_data, config, workspace):
         "guestProfiles": sanitize_guest_profiles(roster),
         "durationMinutes": config.get("durationMinutes"),
         "mood": config.get("mood"),
+        "realism": config.get("realism"),
     }
     json_data["speakers"] = speakers
     json_data["features_enabled"] = get_enabled_features(config)
@@ -221,7 +247,7 @@ def main():
         print(f"Uploaded file URI: {uploaded_file.uri}")
     except Exception as e:
         print(f"ERROR: Failed to upload audio: {e}")
-        make_fallback_metadata(transcript_text, duration_str, today_date, output_path)
+        make_fallback_metadata(transcript_text, duration_str, today_date, output_path, args.workspace)
         return
 
     prompt = f"""You are an AI assistant analyzing a radio show production.
@@ -265,7 +291,7 @@ Return ONLY a valid JSON object. Do NOT wrap it in markdown code blocks. Ensure 
             response_text = interaction.steps[-1].content[0].text
         else:
              print("ERROR: No output received from Gemini.")
-             make_fallback_metadata(transcript_text, duration_str, today_date, output_path)
+             make_fallback_metadata(transcript_text, duration_str, today_date, output_path, args.workspace)
              return
 
         # Clean up potential markdown wrapping if Gemini ignored the instruction
@@ -279,6 +305,9 @@ Return ONLY a valid JSON object. Do NOT wrap it in markdown code blocks. Ensure 
         # Validate JSON
         try:
             json_data = json.loads(response_text)
+            manifest = load_manifest(args.workspace)
+            if manifest and manifest.get("transcript"):
+                json_data["timecoded_transcript"] = transcript_from_manifest(manifest)
             json_data = enrich_metadata(json_data, config, args.workspace)
 
             # Save
@@ -292,11 +321,11 @@ Return ONLY a valid JSON object. Do NOT wrap it in markdown code blocks. Ensure 
             print(f"ERROR: Failed to parse JSON response: {e}")
             print("Raw response was:")
             print(response_text)
-            make_fallback_metadata(transcript_text, duration_str, today_date, output_path)
+            make_fallback_metadata(transcript_text, duration_str, today_date, output_path, args.workspace)
 
     except Exception as e:
         print(f"ERROR: API call failed: {e}")
-        make_fallback_metadata(transcript_text, duration_str, today_date, output_path)
+        make_fallback_metadata(transcript_text, duration_str, today_date, output_path, args.workspace)
 
 if __name__ == "__main__":
     main()
