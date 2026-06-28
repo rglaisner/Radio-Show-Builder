@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: radio-show-builder
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DAILY_QUOTA_LIMIT
+        value: "50"
+      - key: GEMINI_API_KEY
+        sync: false
