@@ -5,7 +5,10 @@ function parseTimecode(time: string): number {
   return mins * 60 + secs;
 }
 
-export function transformShow(raw: RawRadioShow): RadioShow {
+export function transformShow(
+  raw: RawRadioShow,
+  options?: { generationId?: string; isPartial?: boolean }
+): RadioShow {
   const transcript = raw.timecoded_transcript.map((line, i, arr) => {
     const start = parseTimecode(line.timecode);
     const end = line.endTimecode
@@ -44,6 +47,11 @@ export function transformShow(raw: RawRadioShow): RadioShow {
     generationConfig: raw.generation_config,
     featuresEnabled: raw.features_enabled,
     qualityReport: raw.quality_report,
+    isPartial: options?.isPartial ?? raw.isPartial ?? raw.completeness !== "full",
+    completeness: raw.completeness,
+    lastCompletedStep: raw.lastCompletedStep,
+    canResume: raw.canResume,
+    generationId: options?.generationId,
   };
 }
 

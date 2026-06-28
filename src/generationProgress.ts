@@ -1,4 +1,10 @@
-export const PIPELINE_STEP_TOTAL = 12;
+import {
+  PIPELINE_STEP_TOTAL,
+  PIPELINE_STEPS,
+  getCommandFromArgs,
+} from './pipelineSteps';
+
+export { PIPELINE_STEP_TOTAL };
 
 export interface GenerationProgress {
   stepIndex: number;
@@ -15,20 +21,6 @@ export const INITIAL_GENERATION_PROGRESS: GenerationProgress = {
   stepLabel: 'Initializing',
 };
 
-const PIPELINE_STEPS: Array<{ index: number; label: string; matchers: string[] }> = [
-  { index: 1, label: 'Researching topic', matchers: ['fetch_hn.py', 'fetch_github.py', 'fetch_url.py'] },
-  { index: 2, label: 'Writing script', matchers: ['generate_script.py'] },
-  { index: 3, label: 'Reviewing script', matchers: ['script_review.py'] },
-  { index: 4, label: 'Planning audio timeline', matchers: ['direct_audio.py'] },
-  { index: 5, label: 'Generating speech', matchers: ['generate_tts.py'] },
-  { index: 6, label: 'Generating music', matchers: ['generate_music.py'] },
-  { index: 7, label: 'Generating sound effects', matchers: ['generate_sfx.py'] },
-  { index: 8, label: 'Mixing audio', matchers: ['mix_audio.py'] },
-  { index: 9, label: 'Quality check', matchers: ['quality_check.py'] },
-  { index: 10, label: 'Generating metadata', matchers: ['generate_metadata.py'] },
-  { index: 11, label: 'Generating cover image', matchers: ['generate_image.py'] },
-];
-
 const READ_FILE_HINTS: Array<{ pattern: string; subLabel: string }> = [
   { pattern: 'skills/research', subLabel: 'Preparing research' },
   { pattern: 'skills/script-writing', subLabel: 'Preparing script' },
@@ -39,14 +31,6 @@ const READ_FILE_HINTS: Array<{ pattern: string; subLabel: string }> = [
   { pattern: 'skills/cover-image-generation', subLabel: 'Preparing cover image' },
 ];
 
-function getCommandFromArgs(args: unknown): string {
-  if (!args || typeof args !== 'object') return '';
-  const record = args as Record<string, unknown>;
-  if (typeof record.command === 'string') return record.command;
-  if (typeof record.code === 'string') return record.code;
-  return '';
-}
-
 function getPathFromArgs(args: unknown): string {
   if (!args || typeof args !== 'object') return '';
   const record = args as Record<string, unknown>;
@@ -55,7 +39,7 @@ function getPathFromArgs(args: unknown): string {
 
 function stepFromCommand(cmd: string): GenerationProgress | null {
   for (const step of PIPELINE_STEPS) {
-    if (step.matchers.some((m) => cmd.includes(m))) {
+    if (step.matchers.some((matcher) => cmd.includes(matcher))) {
       return {
         stepIndex: step.index,
         stepTotal: PIPELINE_STEP_TOTAL,

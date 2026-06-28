@@ -64,6 +64,22 @@ export interface RawRadioShow {
   generation_config?: GenerationConfigSummary;
   features_enabled?: string[];
   quality_report?: QualityReportSummary;
+  completeness?: SalvageCompleteness;
+  lastCompletedStep?: number;
+  canResume?: boolean;
+  isPartial?: boolean;
+}
+
+export type SalvageCompleteness = "full" | "playable" | "partial";
+
+export interface GenerationCheckpoint {
+  generationId: string;
+  lastCompletedStep: number;
+  canResume: boolean;
+  completeness?: SalvageCompleteness;
+  interactionId?: string;
+  environmentId?: string;
+  status: "running" | "failed" | "salvaged" | "completed";
 }
 
 export interface RadioShow {
@@ -79,6 +95,11 @@ export interface RadioShow {
   shareId?: string;
   shareUrl?: string;
   isUserGenerated?: boolean;
+  isPartial?: boolean;
+  completeness?: SalvageCompleteness;
+  lastCompletedStep?: number;
+  canResume?: boolean;
+  generationId?: string;
   speakers?: SpeakerInfo[];
   generationConfig?: GenerationConfigSummary;
   featuresEnabled?: string[];

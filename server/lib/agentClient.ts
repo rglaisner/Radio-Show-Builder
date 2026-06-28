@@ -28,6 +28,7 @@ export interface AgentEvent {
     | "tool_call"
     | "tool_result"
     | "complete"
+    | "interaction_meta"
     | "error"
     | "done";
   text?: string;
@@ -42,6 +43,87 @@ export interface AgentEvent {
 /*  Create an interaction                                       */
 /* ────────────────────────────────────────────────────────── */
 export const API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+export interface AgentInteraction {
+  id?: string;
+  status?: string;
+  environment_id?: string;
+  environment?: { env_id?: string };
+  usage?: Record<string, unknown>;
+  steps?: unknown[];
+}
+
+export function extractInteractionMetadata(
+  interaction: Record<string, unknown> | undefined
+): { interactionId?: string; environmentId?: string } {
+  if (!interaction) return {};
+
+  const interactionId =
+    typeof interaction.id === "string" ? interaction.id : undefined;
+
+  const environment = interaction.environment as { env_id?: string } | undefined;
+  const environmentId =
+    environment?.env_id ??
+    (typeof interaction.environment_id === "string"
+      ? interaction.environment_id
+      : undefined);
+
+  return { interactionId, environmentId };
+}
+
+export async function getInteraction(
+  interactionId: string,
+  apiKey: string
+): Promise<AgentInteraction | null> {
+  const response = await fetch(`${API_BASE_URL}/interactions/${interactionId}`, {
+    headers: {
+      "x-goog-api-key": apiKey,
+      "Api-Revision": "2026-05-20",
+    },
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    console.error(
+      `[getInteraction] Failed to fetch interaction ${interactionId}: ${response.status} - ${errBody}`
+    );
+    return null;
+  }
+
+  return (await response.json()) as AgentInteraction;
+}
+
+export async function pollInteractionUntilComplete(
+  interactionId: string,
+  apiKey: string,
+  options?: { intervalMs?: number; timeoutMs?: number }
+): Promise<AgentInteraction | null> {
+  const intervalMs = options?.intervalMs ?? 5000;
+  const timeoutMs = options?.timeoutMs ?? 120000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const interaction = await getInteraction(interactionId, apiKey);
+    if (!interaction) {
+      await sleep(intervalMs);
+      continue;
+    }
+
+    if (interaction.status === "completed" || interaction.status === "failed") {
+      return interaction;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  console.warn(`[pollInteractionUntilComplete] Timed out waiting for ${interactionId}`);
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 
 export async function createInteraction(
   opts: InteractionOptions
@@ -307,10 +389,17 @@ function parseAgentEvent(
     }
   }
 
-  // Interaction complete
-  if (eventType === "interaction.completed") {
+  // Interaction complete (API uses both event type names)
+  if (eventType === "interaction.completed" || eventType === "interaction.complete") {
     return {
       type: "complete",
+      interaction: (event.interaction as Record<string, unknown>) ?? {},
+    };
+  }
+
+  if (eventType === "interaction.started" || eventType === "interaction.created") {
+    return {
+      type: "interaction_meta",
       interaction: (event.interaction as Record<string, unknown>) ?? {},
     };
   }
