@@ -67,7 +67,9 @@ ${musicStep}
 10. python3 /.agents/skills/metadata-generation/scripts/generate_metadata.py --workspace ./workspace --config ./workspace/data/show_config.json
 11. python3 /.agents/skills/cover-image-generation/scripts/generate_image.py --workspace ./workspace --metadata ./workspace/data/show_notes.json
 
-Proceed autonomously through all steps. Do not ask for approval. Do NOT edit or patch skill scripts under /.agents/skills/ — run them as-is. Chain sequential bash commands with && when possible.`;
+Proceed autonomously through all steps. Do not ask for approval. Do NOT edit or patch skill scripts under /.agents/skills/ — run them as-is. Chain sequential bash commands with && when possible.
+
+If any command prints POLICY_ERROR: or exits with code 2, STOP immediately. Do not patch skill scripts or continue downstream steps — the server will pause for user remediation.`;
 }
 
 export function serializeShowConfig(config: ShowConfig): string {

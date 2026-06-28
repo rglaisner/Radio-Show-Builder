@@ -116,3 +116,49 @@ ${commandList}
 
 Resume from step ${resumeFrom}. Proceed autonomously. Do not ask for approval.`;
 }
+
+export function buildPolicyResumePrompt(
+  config: ShowConfig,
+  lastCompletedStep: number,
+  options?: { failedEventIds?: string[] }
+): string {
+  const failedEventIds = options?.failedEventIds?.filter(Boolean) ?? [];
+
+  if (failedEventIds.length > 0 && lastCompletedStep >= 4) {
+    const retryList = failedEventIds.join(",");
+    const remaining = RESUME_COMMANDS[4] ?? RESUME_COMMANDS[5];
+    const commandList = remaining
+      .map((cmd, index) => {
+        if (cmd.includes("generate_tts.py")) {
+          return `${index + 1}. python3 /.agents/skills/tts-generation/scripts/generate_tts.py --workspace ./workspace --config ./workspace/data/show_config.json --retry-events ${retryList}`;
+        }
+        const resolved = cmd.includes("--mood") ? `${cmd} ${config.music.mood}` : cmd;
+        return `${index + 1}. ${resolved}`;
+      })
+      .join("\n");
+
+    return `POLICY REMEDIATION RESUME: User-approved content edits have been applied to the workspace.
+
+CRITICAL RULES:
+- Do NOT regenerate the script from scratch — use the patched script.md and audio_timeline.json
+- Do NOT edit skill scripts under /.agents/skills/
+- Re-run TTS only for remediated events, then continue remaining pipeline steps
+- Read workspace/data/show_config.json for customization
+- Do NOT write a long final summary. When all files are produced, reply with one short sentence only.
+
+Topic: ${config.topic}
+Target duration: ${config.durationMinutes} minutes
+
+Run ONLY these commands (in order):
+${commandList}
+
+Proceed autonomously.`;
+  }
+
+  const base = buildResumePrompt(config, lastCompletedStep);
+  return `POLICY REMEDIATION RESUME: User-approved content edits have been applied to the workspace.
+
+CRITICAL: Do NOT regenerate the script from scratch. Use patched workspace files.
+
+${base}`;
+}

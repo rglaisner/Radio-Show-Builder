@@ -14,9 +14,17 @@ import {
 } from "./server/lib/workspaceArchive.ts";
 import { runGeneration, salvageFromCheckpoint } from "./server/lib/generationRunner.ts";
 import { loadCheckpoint, cleanExpiredCheckpoints } from "./server/lib/checkpointStore.ts";
-import { buildResumePrompt } from "./server/lib/resumePrompt.ts";
+import { buildResumePrompt, buildPolicyResumePrompt } from "./server/lib/resumePrompt.ts";
 import { parseShowConfigRequest } from "./src/showConfig.ts";
 import { buildAgentPrompt, serializeShowConfig } from "./server/lib/showConfigPrompt.ts";
+import {
+  loadPolicyIncident,
+  setIncidentRemediation,
+  setIncidentStatus,
+  cleanExpiredPolicyIncidents,
+} from "./server/lib/policyIncidentStore.ts";
+import { applyRemediationToSandbox } from "./server/lib/applyPolicyRemediation.ts";
+import type { PolicyRemediationAction } from "./server/lib/policyTypes.ts";
 import { ZodError } from "zod";
 import { exec } from 'child_process';
 import util from 'util';
@@ -140,6 +148,7 @@ async function startServer() {
   cleanUpOldGenerations();
   cleanUpOldRunArtifacts(7);
   cleanExpiredCheckpoints();
+  cleanExpiredPolicyIncidents();
 
   app.use(express.json({ limit: '50mb' }));
   app.use('/output', express.static(path.join(process.cwd(), 'output')));
@@ -685,12 +694,17 @@ async function startServer() {
         prompt,
         apiKey: geminiApiKey,
         signal: abortController.signal,
+        abortController,
         sendEvent,
         inlineSources: agentFiles.length > 0 ? agentFiles : undefined,
       });
 
       isFinished = true;
-      sendEvent({ type: "status", status: result.showDelivered ? "completed" : "failed" });
+      const pausedPolicy = loadCheckpoint(generationId ?? "")?.status === "paused_policy";
+      sendEvent({
+        type: "status",
+        status: result.showDelivered ? "completed" : pausedPolicy ? "paused_policy" : "failed",
+      });
     } catch (err: any) {
       if (err.name === 'AbortError') {
         console.log(`[generate-show] Agent interaction aborted successfully.`);
@@ -710,6 +724,7 @@ async function startServer() {
 
   app.get("/api/generation-checkpoint/:generationId", (req, res) => {
     cleanExpiredCheckpoints();
+  cleanExpiredPolicyIncidents();
     const checkpoint = loadCheckpoint(req.params.generationId);
     if (!checkpoint) {
       return res.status(404).json({ error: "Checkpoint not found or expired" });
@@ -760,9 +775,90 @@ async function startServer() {
     }
   });
 
+  app.post("/api/apply-policy-remediation", async (req, res) => {
+    cleanExpiredCheckpoints();
+    cleanExpiredPolicyIncidents();
+
+    const body = req.body as {
+      generationId?: string;
+      incidentId?: string;
+      actions?: PolicyRemediationAction[];
+    };
+
+    const { generationId, incidentId, actions } = body;
+    if (!generationId || !incidentId || !actions?.length) {
+      return res.status(400).json({ error: "Missing generationId, incidentId, or actions" });
+    }
+
+    const checkpoint = loadCheckpoint(generationId);
+    if (!checkpoint) {
+      return res.status(404).json({ error: "Checkpoint not found or expired" });
+    }
+    if (!checkpoint.environmentId) {
+      return res.status(400).json({ error: "Checkpoint has no saved environment" });
+    }
+
+    const incident = loadPolicyIncident(generationId);
+    if (!incident || incident.id !== incidentId) {
+      return res.status(404).json({ error: "Policy incident not found" });
+    }
+    if (incident.status !== "awaiting_user" && incident.status !== "detected") {
+      return res.status(400).json({ error: `Incident status is ${incident.status}, cannot apply` });
+    }
+
+    const geminiApiKey = getGeminiApiKey();
+    if (!geminiApiKey) {
+      return res.status(500).json({ error: "GEMINI_API_KEY is not configured." });
+    }
+
+    const applyResult = await applyRemediationToSandbox(
+      checkpoint.environmentId,
+      actions,
+      geminiApiKey
+    );
+
+    if (!applyResult.ok) {
+      return res.status(500).json({ error: applyResult.error ?? "Failed to apply remediation" });
+    }
+
+    let updatedConfig = checkpoint.showConfig;
+    for (const action of actions) {
+      if (action.type === "update_config_field" && action.target.configPath) {
+        if (action.target.configPath === "topic") {
+          updatedConfig = { ...updatedConfig, topic: action.proposed };
+        } else if (action.target.configPath === "toneContext") {
+          updatedConfig = { ...updatedConfig, toneContext: action.proposed };
+        }
+      }
+    }
+
+    const failedEventIds = actions
+      .map((a) => a.target.eventId)
+      .filter((id): id is string => typeof id === "string");
+
+    const { updateCheckpoint } = await import("./server/lib/checkpointStore.ts");
+    updateCheckpoint(generationId, {
+      showConfig: updatedConfig,
+      status: "running",
+      policyIncidentId: incidentId,
+      policyFailedEventIds:
+        failedEventIds.length > 0 ? failedEventIds : checkpoint.policyFailedEventIds,
+      canResume: true,
+    });
+
+    setIncidentRemediation(generationId, { actions });
+    setIncidentStatus(generationId, "applied");
+
+    return res.json({ ok: true, generationId, incidentId });
+  });
+
   app.post("/api/resume-show", async (req, res) => {
     cleanExpiredCheckpoints();
-    const { generationId } = req.body as { generationId?: string };
+    cleanExpiredPolicyIncidents();
+    const { generationId, policyIncidentId } = req.body as {
+      generationId?: string;
+      policyIncidentId?: string;
+    };
     if (!generationId) {
       return res.status(400).json({ error: "Missing generationId" });
     }
@@ -774,7 +870,7 @@ async function startServer() {
     if (!checkpoint.environmentId) {
       return res.status(400).json({ error: "Checkpoint has no saved environment to resume" });
     }
-    if (!checkpoint.canResume && checkpoint.lastCompletedStep >= 11) {
+    if (!checkpoint.canResume && checkpoint.lastCompletedStep >= 11 && checkpoint.status !== "paused_policy") {
       return res.status(400).json({ error: "This generation cannot be resumed; try salvage instead" });
     }
 
@@ -816,19 +912,38 @@ async function startServer() {
         message: `Resuming from step ${checkpoint.lastCompletedStep + 1}...`,
       });
 
-      const prompt = buildResumePrompt(checkpoint.showConfig, checkpoint.lastCompletedStep);
+      const incident = loadPolicyIncident(generationId);
+      const usePolicyResume =
+        Boolean(policyIncidentId || checkpoint.policyIncidentId || checkpoint.status === "paused_policy");
+
+      const prompt = usePolicyResume
+        ? buildPolicyResumePrompt(checkpoint.showConfig, checkpoint.lastCompletedStep, {
+            failedEventIds:
+              checkpoint.policyFailedEventIds ??
+              incident?.failedEventIds ??
+              incident?.remediation?.actions
+                ?.map((a) => a.target.eventId)
+                .filter((id): id is string => Boolean(id)),
+          })
+        : buildResumePrompt(checkpoint.showConfig, checkpoint.lastCompletedStep);
+
       const result = await runGeneration({
         generationId,
         showConfig: checkpoint.showConfig,
         prompt,
         apiKey: geminiApiKey,
         signal: abortController.signal,
+        abortController,
         sendEvent,
         environmentId: checkpoint.environmentId,
         previousInteractionId: checkpoint.interactionId,
       });
 
-      sendEvent({ type: "status", status: result.showDelivered ? "completed" : "failed" });
+      const pausedPolicy = loadCheckpoint(generationId)?.status === "paused_policy";
+      sendEvent({
+        type: "status",
+        status: result.showDelivered ? "completed" : pausedPolicy ? "paused_policy" : "failed",
+      });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         console.log(`[resume-show] Aborted: ${generationId}`);

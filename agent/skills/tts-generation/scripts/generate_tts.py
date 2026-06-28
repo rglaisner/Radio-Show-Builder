@@ -38,6 +38,42 @@ MAX_WORKERS = 8
 
 MARKER_LINES = {"[connect]", "[stinger]", "[hold]"}
 
+POLICY_ERROR_MARKERS = (
+    "input blocked",
+    "prohibited use",
+    "content policy",
+    "sensitive words",
+    "safety filter",
+)
+
+
+def is_policy_error(exc):
+    message = str(exc).lower()
+    return any(marker in message for marker in POLICY_ERROR_MARKERS)
+
+
+def record_policy_incident(workspace, incident):
+    incidents_path = os.path.join(workspace, "data", "policy_incidents.json")
+    os.makedirs(os.path.dirname(incidents_path), exist_ok=True)
+    incidents = []
+    if os.path.exists(incidents_path):
+        with open(incidents_path, encoding="utf-8") as f:
+            try:
+                incidents = json.load(f)
+            except json.JSONDecodeError:
+                incidents = []
+    incidents.append(incident)
+    with open(incidents_path, "w", encoding="utf-8") as f:
+        json.dump(incidents, f, indent=2)
+
+    payload = {
+        "eventId": incident.get("eventId"),
+        "speaker": incident.get("speaker"),
+        "text": incident.get("text", "")[:500],
+        "providerMessage": incident.get("providerMessage", "")[:500],
+    }
+    print(f"POLICY_ERROR:{json.dumps(payload)}", flush=True)
+
 
 def build_profiles(config, guided_map=None):
     host = config.get("host", {})
@@ -244,6 +280,7 @@ def process_event(
     profiles,
     host_name,
     config,
+    workspace,
     boost=False,
     tts_note="",
 ):
@@ -264,6 +301,19 @@ def process_event(
                 break
             print(f"    [{event_id}] Attempt {attempt}/{MAX_RETRIES}: no audio returned")
         except Exception as e:
+            if is_policy_error(e):
+                provider_message = str(e)
+                record_policy_incident(
+                    workspace,
+                    {
+                        "eventId": event_id,
+                        "speaker": speaker,
+                        "text": text,
+                        "providerMessage": provider_message,
+                    },
+                )
+                print(f"    [{event_id}] ✗ Policy block — skipping segment (remediation required)", flush=True)
+                return (event_id, None)
             print(f"    [{event_id}] Attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(2 * attempt)
@@ -400,7 +450,16 @@ def main():
     parser.add_argument("--workspace", default="workspace", help="Workspace directory")
     parser.add_argument("--config", default=None, help="Path to show_config.json")
     parser.add_argument("--workers", type=int, default=MAX_WORKERS, help="Max parallel TTS workers")
+    parser.add_argument(
+        "--retry-events",
+        default=None,
+        help="Comma-separated event IDs to regenerate (after policy remediation)",
+    )
     args = parser.parse_args()
+
+    retry_event_ids = None
+    if args.retry_events:
+        retry_event_ids = {e.strip() for e in args.retry_events.split(",") if e.strip()}
 
     config = load_show_config(args.workspace, args.config)
     host_name = get_host_name(config)
@@ -422,6 +481,10 @@ def main():
 
     timeline = load_timeline(args.workspace)
     speech_events = get_speech_events(timeline, script)
+
+    if retry_event_ids:
+        speech_events = [e for e in speech_events if e.get("id") in retry_event_ids]
+        print(f"Retry mode: regenerating {len(speech_events)} event(s)")
 
     print("=== AI Talk Radio: TTS Generation ===\n")
     print(f"Found {len(speech_events)} speech events (host: {host_name})")
@@ -482,6 +545,7 @@ def main():
                 profiles,
                 host_name,
                 config,
+                args.workspace,
                 boost,
                 event.get("ttsNote", ""),
             ): event["id"]
@@ -519,6 +583,17 @@ def main():
             print(f" ({failed} failed)")
         else:
             print()
+
+    incidents_path = os.path.join(args.workspace, "data", "policy_incidents.json")
+    if os.path.exists(incidents_path) and not retry_event_ids:
+        with open(incidents_path, encoding="utf-8") as f:
+            try:
+                incidents = json.load(f)
+            except json.JSONDecodeError:
+                incidents = []
+        if incidents:
+            print(f"\n⚠ Policy incidents recorded: {len(incidents)} segment(s) blocked")
+            sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -152,9 +152,19 @@ Regardless of user configuration:
 1. Host always gets studio-quality audio; remote guests sound distinct (phone/field filter)
 2. Every caller introduced by name and location before first line
 3. Total duration within ±15% of `durationMinutes` in config
-4. Failed TTS turns retried up to 3 times; never silently skip
+4. Failed TTS turns retried up to 3 times for transient errors; **policy blocks** exit immediately with `POLICY_ERROR:` JSON — do not retry or patch skill scripts
 5. Final mix loudness normalized (~-16 LUFS)
 6. Content safety rules enforced (see below)
+
+## Policy Violations (POLICY_ERROR)
+
+When any skill prints `POLICY_ERROR:` or exits with code `2`:
+
+- **STOP immediately** — do not continue to downstream pipeline steps
+- **Do NOT** edit, patch, or rewrite scripts under `/.agents/skills/`
+- **Do NOT** attempt to bypass content filters or weaken `script_review.py`
+- The server will pause generation, analyze the blocked content, and wait for user-approved remediation
+- After remediation, resume using the server's policy-aware resume prompt (patched workspace files + `--retry-events` for TTS)
 
 ## Content Rules
 
@@ -202,4 +212,5 @@ Technology, software, programming, open source, AI/ML, science, engineering, dev
 - **Lyria availability**: If it fails, proceed without background music.
 - **ffmpeg missing**: Skip telephone filter and loudnorm; use raw TTS audio.
 - **Script review fails twice**: Proceed with warnings logged.
+- **Policy error (POLICY_ERROR / exit code 2)**: Stop — wait for server remediation; never patch skill scripts.
 - **No web access for a source**: Use Google Search as a fallback.

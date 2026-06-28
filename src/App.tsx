@@ -13,6 +13,7 @@ import { Transcript } from './components/Transcript';
 import { GuestRosterEditor } from './components/GuestRosterEditor';
 import { ShowStartersPanel } from './components/ShowStartersPanel';
 import { QuickStartGuide, isQuickStartDismissed } from './components/QuickStartGuide';
+import { PolicyRemediationModal } from './components/PolicyRemediationModal';
 import { RainbowBackground } from './components/RainbowBackground';
 import { LoadingScreen } from './components/LoadingScreen';
 import { AuraTorquePulsarSpinner } from './components/AuraTorquePulsarSpinner';
@@ -32,7 +33,7 @@ import {
   type GenerationProgress,
 } from './generationProgress';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
-import type { GenerationCheckpoint } from './types';
+import type { GenerationCheckpoint, PolicyIncidentState, PolicyRemediationAction, PolicyReviewResult } from './types';
 import { z } from 'zod';
 import {
   buildShowConfig,
@@ -250,6 +251,9 @@ export default function App() {
   const [runArtifactsAvailable, setRunArtifactsAvailable] = useState(false);
   const [failedCheckpoint, setFailedCheckpoint] = useState<GenerationCheckpoint | null>(null);
   const [salvagedShowAvailable, setSalvagedShowAvailable] = useState(false);
+  const [policyIncident, setPolicyIncident] = useState<PolicyIncidentState | null>(null);
+  const [policyModalOpen, setPolicyModalOpen] = useState(false);
+  const [policyApplying, setPolicyApplying] = useState(false);
 
   // --- RATE LIMITER & QUOTA STATES ---
   const DAILY_LIMIT = 3;
@@ -1074,6 +1078,127 @@ export default function App() {
     setGenerationComplete(true);
   };
 
+  const handlePolicySseEvent = (event: Record<string, unknown>) => {
+    if (event.type === "policy_pause" && event.incident && typeof event.incident === "object") {
+      const inc = event.incident as Record<string, unknown>;
+      setPolicyIncident({
+        incidentId: String(inc.incidentId ?? ""),
+        generationId: String(inc.generationId ?? generationIdRef.current ?? ""),
+        stepIndex: Number(inc.stepIndex ?? 0),
+        stepLabel: String(inc.stepLabel ?? "Unknown step"),
+        providerMessage: String(inc.providerMessage ?? ""),
+        status: "detected",
+        causingInput:
+          inc.causingInput && typeof inc.causingInput === "object"
+            ? (inc.causingInput as PolicyIncidentState["causingInput"])
+            : undefined,
+      });
+      setPolicyModalOpen(true);
+      setIsGenerating(false);
+      setIsFinalizing(false);
+      return;
+    }
+
+    if (event.type === "policy_review" && event.review && typeof event.review === "object") {
+      setPolicyIncident((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "awaiting_user",
+              review: event.review as PolicyReviewResult,
+            }
+          : prev
+      );
+    }
+  };
+
+  const handleApplyPolicyRemediation = async (actions: PolicyRemediationAction[]) => {
+    const generationId = generationIdRef.current;
+    if (!generationId || !policyIncident) return;
+
+    setPolicyApplying(true);
+    try {
+      const applyResponse = await fetch("/api/apply-policy-remediation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          generationId,
+          incidentId: policyIncident.incidentId,
+          actions,
+        }),
+      });
+
+      if (!applyResponse.ok) {
+        const errData = await applyResponse.json().catch(() => ({}));
+        throw new Error(
+          typeof errData.error === "string" ? errData.error : "Failed to apply remediation"
+        );
+      }
+
+      setPolicyModalOpen(false);
+      setPolicyIncident(null);
+      setIsGenerating(true);
+      setIsFinalizing(false);
+      setGenerationComplete(false);
+      abortControllerRef.current = new AbortController();
+
+      const response = await fetch("/api/resume-show", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          generationId,
+          policyIncidentId: policyIncident.incidentId,
+        }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof errData.error === "string" ? errData.error : `Resume failed (${response.status})`
+        );
+      }
+
+      setIsFinalizing(true);
+      applyProgressUpdate(finalizingProgress());
+      const generatedShow = await consumeGenerationResponse(response, generationId);
+      if (generatedShow) {
+        await finalizeGeneratedShow(generatedShow);
+      }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        const errMsg = error instanceof Error ? error.message : "Unknown error";
+        setGenerationLogs((prev) => [
+          ...prev,
+          {
+            id: Math.random().toString(),
+            timestamp: new Date().toISOString().split("T")[1].split(".")[0],
+            type: "error",
+            content: `Policy remediation error: ${errMsg}`,
+          },
+        ]);
+        setPolicyModalOpen(true);
+      }
+    } finally {
+      setPolicyApplying(false);
+      setIsGenerating(false);
+      setIsFinalizing(false);
+    }
+  };
+
+  const handlePolicyCancel = () => {
+    setPolicyModalOpen(false);
+    setPolicyIncident(null);
+    setIsGenerating(false);
+    setView("home");
+  };
+
+  const handlePolicyEditSettings = () => {
+    setPolicyModalOpen(false);
+    setIsGenerating(false);
+    setView("home");
+  };
+
   const handleGenerate = async (e?: React.FormEvent, overridePrompt?: string, overrideDuration?: string, overrideMood?: string) => {
     if (e) e.preventDefault();
     if (!auth.currentUser && AUTH_REQUIRED) {
@@ -1101,6 +1226,9 @@ export default function App() {
     setRunArtifactsAvailable(false);
     setFailedCheckpoint(null);
     setSalvagedShowAvailable(false);
+    setPolicyIncident(null);
+    setPolicyModalOpen(false);
+    setPolicyApplying(false);
 
     setStartTime(Date.now());
     setElapsedTime(0);
@@ -1210,6 +1338,7 @@ export default function App() {
 
       const decoder = new TextDecoder();
       let buffer = "";
+      let streamPolicyPaused = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1339,16 +1468,27 @@ export default function App() {
                  interactionId: event.data.interactionId,
                  environmentId: event.data.environmentId,
                  status: event.data.status ?? "failed",
+                 policyIncidentId: event.data.policyIncidentId,
                });
             } else if (event.type === "run_artifacts" && event.generationId) {
                if (event.hasAudio || event.hasShowNotes) {
                  setRunArtifactsAvailable(true);
+               }
+            } else if (event.type === "policy_pause" || event.type === "policy_review") {
+               handlePolicySseEvent(event);
+               if (event.type === "policy_pause") {
+                 streamPolicyPaused = true;
                }
             }
           } catch (e) {
             console.error("Error parsing event:", e, dataStr);
           }
         }
+      }
+
+      if (streamPolicyPaused) {
+        setIsFinalizing(false);
+        return;
       }
 
       setIsFinalizing(true);
@@ -1411,6 +1551,8 @@ export default function App() {
     setRunArtifactsAvailable(false);
     setFailedCheckpoint(null);
     setSalvagedShowAvailable(false);
+    setPolicyIncident(null);
+    setPolicyModalOpen(false);
   };
 
   const consumeGenerationResponse = async (
@@ -1524,11 +1666,14 @@ export default function App() {
               interactionId: event.data.interactionId,
               environmentId: event.data.environmentId,
               status: event.data.status ?? "failed",
+              policyIncidentId: event.data.policyIncidentId,
             });
           } else if (event.type === "run_artifacts" && event.generationId) {
             if (event.hasAudio || event.hasShowNotes) {
               setRunArtifactsAvailable(true);
             }
+          } else if (event.type === "policy_pause" || event.type === "policy_review") {
+            handlePolicySseEvent(event);
           }
         } catch (parseError) {
           console.error("Error parsing generation event:", parseError, dataStr);
@@ -2446,6 +2591,15 @@ export default function App() {
         </div>
 
         <QuickStartGuide open={quickStartOpen} onClose={() => setQuickStartOpen(false)} />
+        <PolicyRemediationModal
+          open={policyModalOpen}
+          incident={policyIncident}
+          applying={policyApplying}
+          onClose={() => setPolicyModalOpen(false)}
+          onCancel={handlePolicyCancel}
+          onEditSettings={handlePolicyEditSettings}
+          onApplyAndResume={handleApplyPolicyRemediation}
+        />
       </div>
     );
   }

@@ -3,7 +3,12 @@ import path from "path";
 import type { ShowConfig } from "../../src/showConfig.ts";
 import type { SalvageCompleteness } from "./workspaceSalvage.ts";
 
-export type CheckpointStatus = "running" | "failed" | "salvaged" | "completed";
+export type CheckpointStatus =
+  | "running"
+  | "failed"
+  | "salvaged"
+  | "completed"
+  | "paused_policy";
 
 export interface GenerationCheckpoint {
   generationId: string;
@@ -14,6 +19,8 @@ export interface GenerationCheckpoint {
   environmentId?: string;
   showConfig: ShowConfig;
   status: CheckpointStatus;
+  policyIncidentId?: string;
+  policyFailedEventIds?: string[];
   createdAt: string;
   updatedAt: string;
 }

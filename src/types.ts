@@ -72,6 +72,70 @@ export interface RawRadioShow {
 
 export type SalvageCompleteness = "full" | "playable" | "partial";
 
+export type CheckpointStatus =
+  | "running"
+  | "failed"
+  | "salvaged"
+  | "completed"
+  | "paused_policy";
+
+export type PolicyCauseSource =
+  | "script_line"
+  | "tts_text"
+  | "topic"
+  | "tone_context"
+  | "sponsor_read"
+  | "image_prompt"
+  | "metadata_prompt";
+
+export interface PolicyCause {
+  id: string;
+  confidence: "high" | "medium";
+  source: PolicyCauseSource;
+  location: { file?: string; line?: number; eventId?: string };
+  excerpt: string;
+  triggerPhrases: string[];
+  explanation: string;
+}
+
+export interface PolicyRemediationAction {
+  id: string;
+  type:
+    | "replace_text"
+    | "update_config_field"
+    | "skip_event"
+    | "soften_sponsor_read";
+  target: { file?: string; eventId?: string; configPath?: string };
+  original: string;
+  proposed: string;
+  rationale: string;
+}
+
+export interface PolicyReviewResult {
+  recoverable: boolean;
+  summary: string;
+  causes: PolicyCause[];
+  actions: PolicyRemediationAction[];
+}
+
+export interface PolicyCausingInput {
+  source: "script" | "tts_prompt" | "show_config" | "metadata_prompt" | "image_prompt";
+  file?: string;
+  eventId?: string;
+  excerpt: string;
+}
+
+export interface PolicyIncidentState {
+  incidentId: string;
+  generationId: string;
+  stepIndex: number;
+  stepLabel: string;
+  providerMessage: string;
+  status: "detected" | "reviewing" | "awaiting_user" | "applied" | "cancelled";
+  causingInput?: PolicyCausingInput;
+  review?: PolicyReviewResult;
+}
+
 export interface GenerationCheckpoint {
   generationId: string;
   lastCompletedStep: number;
@@ -79,7 +143,8 @@ export interface GenerationCheckpoint {
   completeness?: SalvageCompleteness;
   interactionId?: string;
   environmentId?: string;
-  status: "running" | "failed" | "salvaged" | "completed";
+  status: CheckpointStatus;
+  policyIncidentId?: string;
 }
 
 export interface RadioShow {

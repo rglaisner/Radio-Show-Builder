@@ -18,6 +18,8 @@ import {
 } from "./checkpointStore.ts";
 import type { ShowConfig } from "../../src/showConfig.ts";
 import { stepIndexFromToolCall } from "../../src/pipelineSteps.ts";
+import { isQuotaError, isPolicyError } from "./policyErrorDetector.ts";
+import { PolicyErrorHandler } from "./policyErrorHandler.ts";
 
 export interface GenerationRunState {
   generationId: string;
@@ -38,6 +40,7 @@ export interface GenerationRunnerOptions {
   environmentId?: string;
   previousInteractionId?: string;
   inlineSources?: Array<{ type: string; content: string; target: string }>;
+  abortController?: AbortController;
 }
 
 export interface GenerationRunnerResult {
@@ -64,7 +67,7 @@ function emitCheckpoint(
 
   if (!checkpoint) return;
 
-  sendEvent({
+      sendEvent({
       type: "checkpoint",
       data: {
         generationId: checkpoint.generationId,
@@ -74,6 +77,7 @@ function emitCheckpoint(
         interactionId: checkpoint.interactionId,
         environmentId: checkpoint.environmentId,
         status: checkpoint.status,
+        policyIncidentId: checkpoint.policyIncidentId,
       },
     });
 }
@@ -231,7 +235,10 @@ export async function runGeneration(
     environmentId,
     previousInteractionId,
     inlineSources,
+    abortController,
   } = options;
+
+  let currentStepIndex = 0;
 
   const state: GenerationRunState = {
     generationId,
@@ -241,6 +248,28 @@ export async function runGeneration(
     lastCompletedStep: 0,
     status: "running",
   };
+
+  const policyHandler = new PolicyErrorHandler({
+    generationId,
+    showConfig,
+    apiKey,
+    getState: () => ({
+      environmentId: state.environmentId,
+      lastCompletedStep: state.lastCompletedStep,
+      currentStepIndex,
+      ttsToolInFlight: policyHandler.isTtsInFlight(),
+    }),
+    sendEvent,
+    abortRun: () => abortController?.abort(),
+    onCheckpointUpdate: (patch) => {
+      state.status = patch.status;
+      emitCheckpoint(state, sendEvent, {
+        status: patch.status,
+        policyIncidentId: patch.policyIncidentId,
+        canResume: true,
+      });
+    },
+  });
 
   saveCheckpoint({
     generationId,
@@ -281,18 +310,34 @@ export async function runGeneration(
         // keep default message
       }
 
-      const isQuotaError =
-        response.status === 429 ||
-        errorText.toLowerCase().includes("quota") ||
-        errorText.toLowerCase().includes("too_many_requests") ||
-        errorText.toLowerCase().includes("resource_exhausted") ||
-        displayMessage.toLowerCase().includes("quota");
+      const quotaError = isQuotaError(errorText, response.status);
 
-      if (isQuotaError) {
+      if (quotaError) {
         displayMessage = `Gemini API Quota Limit Reached: ${displayMessage}. The shared free-tier Google Gemini API Key has run out of request quota. To resolve this, go to Settings > Secrets inside AI Studio to verify your personal Gemini API key or set up billing.`;
       }
 
-      sendEvent({ type: "error", message: displayMessage });
+      const isPolicy = isPolicyError(displayMessage);
+
+      sendEvent({
+        type: "error",
+        message: displayMessage,
+        ...(isPolicy ? { code: "policy" } : {}),
+      });
+
+      if (isPolicy) {
+        await policyHandler.handlePolicyText(displayMessage, currentStepIndex);
+        state.status = "paused_policy";
+        emitCheckpoint(state, sendEvent, { canResume: true });
+        return { completed: false, salvaged: false, showDelivered: false };
+      }
+
+      if (quotaError) {
+        state.status = "failed";
+        emitCheckpoint(state, sendEvent);
+        await attemptSalvage(state, apiKey, sendEvent);
+        return { completed: false, salvaged: false, showDelivered: false };
+      }
+
       state.status = "failed";
       emitCheckpoint(state, sendEvent);
       await attemptSalvage(state, apiKey, sendEvent);
@@ -350,8 +395,21 @@ export async function runGeneration(
       if (event.type === "tool_call") {
         const stepIndex = stepIndexFromToolCall(event.name ?? "", event.arguments);
         if (stepIndex !== null) {
+          currentStepIndex = stepIndex;
           state.lastCompletedStep = Math.max(state.lastCompletedStep, stepIndex);
           emitCheckpoint(state, sendEvent);
+        }
+        policyHandler.handleToolCall(event.name ?? "", event.arguments);
+      }
+
+      if (event.type === "tool_result") {
+        if (event.result) {
+          await policyHandler.awaitPolicyCheck(event.result, currentStepIndex);
+        }
+        policyHandler.handleToolResult(event.name, event.result);
+        if (policyHandler.isPaused()) {
+          sendEvent(event as Record<string, unknown>);
+          break;
         }
       }
 
@@ -366,11 +424,27 @@ export async function runGeneration(
 
       if (event.type === "text" && event.text) {
         accumulatedText += event.text;
+        if (event.text.includes("POLICY_ERROR:")) {
+          void policyHandler.handleStreamError(event.text);
+        }
       }
 
       if (event.type === "error") {
-        sendEvent({ type: "error", message: event.message ?? "Unknown stream error" });
+        const message = event.message ?? "Unknown stream error";
+        policyHandler.handleStreamError(message);
+        sendEvent({
+          type: "error",
+          message,
+          ...(policyHandler.isPaused() ? { code: "policy" } : {}),
+        });
+        if (policyHandler.isPaused()) break;
       }
+    }
+
+    if (policyHandler.isPaused()) {
+      state.status = "paused_policy";
+      emitCheckpoint(state, sendEvent, { canResume: true });
+      return { completed: false, salvaged: false, showDelivered: false };
     }
 
     if (accumulatedText) {
@@ -426,8 +500,13 @@ export async function runGeneration(
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       console.log(`[generationRunner] Aborted: ${generationId}`);
-      state.status = "failed";
-      emitCheckpoint(state, sendEvent);
+      if (policyHandler.isPaused()) {
+        state.status = "paused_policy";
+        emitCheckpoint(state, sendEvent, { canResume: true });
+      } else {
+        state.status = "failed";
+        emitCheckpoint(state, sendEvent);
+      }
     } else {
       console.error(`[generationRunner] Error for ${generationId}:`, error);
       const message = error instanceof Error ? error.message : "Unknown error";
