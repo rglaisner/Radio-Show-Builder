@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Play, Pause, Volume2, Info, List, ChevronDown, ChevronUp, Settings2, Clock, Radio,
@@ -32,6 +32,13 @@ import {
   progressFromToolResult,
   type GenerationProgress,
 } from './generationProgress';
+import {
+  estimateFromFormState,
+  estimateFromShowConfig,
+  estimateRemainingMs,
+  formatEstimateLabel,
+  formatRemainingLabel,
+} from './generationEstimate';
 import { saveUserShow, getUserShows, deleteUserShow } from './lib/clientDb';
 import type { GenerationCheckpoint, PolicyIncidentState, PolicyRemediationAction, PolicyReviewResult } from './types';
 import { z } from 'zod';
@@ -53,6 +60,7 @@ import {
   applyStarterToOverrides,
   getStarterById,
   resolveGuestLimitStyle,
+  getDefaultGuestCount,
   type ShowConfig,
   type UiMood,
   type ShowStyle,
@@ -247,6 +255,7 @@ export default function App() {
   const [showGenerationLog, setShowGenerationLog] = useState(false);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
+  const [activeEstimateMinutes, setActiveEstimateMinutes] = useState<number | null>(null);
   const [hasQuotaError, setHasQuotaError] = useState(false);
   const [runArtifactsAvailable, setRunArtifactsAvailable] = useState(false);
   const [failedCheckpoint, setFailedCheckpoint] = useState<GenerationCheckpoint | null>(null);
@@ -350,6 +359,35 @@ export default function App() {
     if (mins > 0) return `${mins}m ${secs}s`;
     return `${secs}s`;
   };
+
+  const parseDurationMinutes = (value: string): 3 | 5 | 10 | 15 =>
+    ([3, 5, 10, 15] as const).includes(Number(value) as 3 | 5 | 10 | 15)
+      ? (Number(value) as 3 | 5 | 10 | 15)
+      : 3;
+
+  const homeEstimateMinutes = useMemo(
+    () =>
+      estimateFromFormState({
+        durationMinutes: parseDurationMinutes(targetDuration),
+        overrides: advancedOverrides,
+        defaultGuestCount: getDefaultGuestCount(effectiveShowStyle),
+      }),
+    [targetDuration, advancedOverrides, effectiveShowStyle]
+  );
+
+  const generationRemainingMs =
+    startTime && activeEstimateMinutes !== null
+      ? estimateRemainingMs(elapsedTime, generationProgress, { finalizing: isFinalizing })
+      : null;
+
+  const generationEstimateLabel =
+    activeEstimateMinutes !== null
+      ? `Est: ${formatEstimateLabel(activeEstimateMinutes)}${
+          generationRemainingMs !== null
+            ? ` · ${formatRemainingLabel(generationRemainingMs)}`
+            : ''
+        }`
+      : null;
 
   const applyProgressUpdate = (next: GenerationProgress) => {
     setGenerationProgress(next);
@@ -1270,6 +1308,7 @@ export default function App() {
           presetId: selectedPresetId,
           overrides: advancedOverrides,
         });
+        setActiveEstimateMinutes(estimateFromShowConfig(showConfig));
         setConfigError(null);
       } catch (error) {
         if (error instanceof z.ZodError) {
@@ -1553,6 +1592,7 @@ export default function App() {
     setSalvagedShowAvailable(false);
     setPolicyIncident(null);
     setPolicyModalOpen(false);
+    setActiveEstimateMinutes(null);
   };
 
   const consumeGenerationResponse = async (
@@ -1819,7 +1859,9 @@ export default function App() {
   const generationElapsedFooter = startTime ? (
     <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest shrink-0 hidden sm:block">
       Elapsed: {formatElapsed(elapsedTime)} <span className="opacity-30">/</span>{' '}
-      <span className="text-io-blue font-bold">Est: ~5 mins</span>
+      {generationEstimateLabel ? (
+        <span className="text-io-blue font-bold">{generationEstimateLabel}</span>
+      ) : null}
     </p>
   ) : null;
 
@@ -1996,8 +2038,14 @@ export default function App() {
                 </p>
               </div>
               {startTime ? (
-                <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest shrink-0 sm:hidden">
+                <p className="font-mono text-[10px] text-white/45 uppercase tracking-widest shrink-0 sm:hidden text-right">
                   {formatElapsed(elapsedTime)}
+                  {generationEstimateLabel ? (
+                    <>
+                      <br />
+                      <span className="text-io-blue font-bold">{generationEstimateLabel}</span>
+                    </>
+                  ) : null}
                 </p>
               ) : null}
             </div>
@@ -2488,7 +2536,7 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 text-[11px] text-white/30">
                   <div className="flex items-center gap-2 font-medium">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#fbbc04]/80 animate-pulse shadow-[0_0_6px_rgba(251,188,4,0.5)]" />
-                    <span>Each radio show generation takes <strong className="text-white/60 font-bold">~5 minutes</strong> to research and voice.</span>
+                    <span>A {targetDuration}-minute show typically takes <strong className="text-white/60 font-bold">{formatEstimateLabel(homeEstimateMinutes)}</strong> to build.</span>
                   </div>
                   <div className="flex items-center gap-3.5">
                     <span>Please do not submit any sensitive or personal information.</span>

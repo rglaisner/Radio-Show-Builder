@@ -19,7 +19,7 @@ const STEPS = [
   },
   {
     title: 'Generate and listen',
-    body: 'Hit Generate — agents research, script, voice, and mix your show in about five minutes. Host and guest profile fields shape who speaks and how; they do not change your topic.',
+    body: 'Hit Generate — agents research, script, voice, and mix your show (typically 8–20 minutes depending on show length and options). Host and guest profile fields shape who speaks and how; they do not change your topic.',
   },
 ] as const;
 
